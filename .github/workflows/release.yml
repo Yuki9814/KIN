@@ -336,6 +336,20 @@ jobs:
           }
           python scripts/kin-release-asset-gate.py --windows-only (Join-Path $release "KIN-windows.msi") (Join-Path $release "KIN-windows.exe")
 
+      - name: Print jpackage logs on failure
+        if: failure()
+        shell: pwsh
+        run: |
+          $logs = @(Get-ChildItem "multiplatform/desktopApp/build/compose/logs" -Recurse -File -ErrorAction SilentlyContinue)
+          if ($logs.Count -eq 0) {
+            Write-Output "No jpackage logs were produced."
+          }
+          foreach ($log in $logs) {
+            Write-Output "::group::$($log.Name)"
+            Get-Content -LiteralPath $log.FullName
+            Write-Output "::endgroup::"
+          }
+
       - name: Upload Windows artifacts
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:

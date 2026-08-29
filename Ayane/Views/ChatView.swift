@@ -333,6 +333,7 @@ struct ChatView: View {
     ) -> String {
         let timeFormatter = DateFormatter()
         timeFormatter.calendar = calendar
+        timeFormatter.timeZone = calendar.timeZone
         timeFormatter.locale = Locale(identifier: "zh_CN")
         timeFormatter.dateFormat = "HH:mm"
         let time = timeFormatter.string(from: date)
@@ -350,6 +351,7 @@ struct ChatView: View {
         default:
             let dateFormatter = DateFormatter()
             dateFormatter.calendar = calendar
+            dateFormatter.timeZone = calendar.timeZone
             dateFormatter.locale = Locale(identifier: "zh_CN")
             dateFormatter.dateFormat = calendar.component(.year, from: date) == calendar.component(.year, from: now)
                 ? "M月d日 HH:mm"

@@ -43,6 +43,20 @@ jobs:
             Pop-Location
           }
 
+      - name: Print jpackage logs on failure
+        if: failure()
+        shell: pwsh
+        run: |
+          $logs = @(Get-ChildItem "multiplatform/desktopApp/build/compose/logs" -Recurse -File -ErrorAction SilentlyContinue)
+          if ($logs.Count -eq 0) {
+            Write-Output "No jpackage logs were produced."
+          }
+          foreach ($log in $logs) {
+            Write-Output "::group::$($log.Name)"
+            Get-Content -LiteralPath $log.FullName
+            Write-Output "::endgroup::"
+          }
+
       - name: Verify package outputs and print SHA256
         shell: pwsh
         run: |

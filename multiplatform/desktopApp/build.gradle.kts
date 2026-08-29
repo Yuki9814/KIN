@@ -40,9 +40,9 @@ compose.desktop {
             // remains kinVersion in Gradle/Android metadata; Windows
             // installers use the normalized native package version.
             packageVersion = nativePackageVersion
-            // Keep the public product version discoverable inside native
-            // installers even when jpackage normalizes the package version.
-            description = "KIN 有灵 $kinVersion"
+            // WiX 3 emits a code-page error when installer metadata contains
+            // characters outside Windows-1252 on an English build host.
+            description = "KIN companion app $kinVersion"
             vendor = "KIN"
             windows {
                 menuGroup = "KIN"

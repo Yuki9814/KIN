@@ -14,6 +14,7 @@ final class MessagePresentationTests: XCTestCase {
         )))
         let today = try XCTUnwrap(calendar.date(byAdding: .minute, value: -12, to: now))
         let fiveDaysAgo = try XCTUnwrap(calendar.date(byAdding: .day, value: -5, to: now))
+        let elevenDaysAgo = try XCTUnwrap(calendar.date(byAdding: .day, value: -11, to: now))
 
         XCTAssertEqual(
             ChatView.messageTimeLabel(for: today, relativeTo: now, calendar: calendar),
@@ -22,6 +23,10 @@ final class MessagePresentationTests: XCTestCase {
         XCTAssertEqual(
             ChatView.messageTimeLabel(for: fiveDaysAgo, relativeTo: now, calendar: calendar),
             "5天前"
+        )
+        XCTAssertEqual(
+            ChatView.messageTimeLabel(for: elevenDaysAgo, relativeTo: now, calendar: calendar),
+            "8月18日 21:14"
         )
     }
 
