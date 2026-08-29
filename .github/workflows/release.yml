@@ -61,9 +61,10 @@ jobs:
             --output "${checksums}"
           test "$(sha256sum "${checksums}" | cut -d' ' -f1)" = \
             38c23e6c738df717d839cc73938ca135332b49c2dda435138164ff1241250938
+          test "$(sha256sum "${archive}" | cut -d' ' -f1)" = \
+            fa0500f6b7e41d28791ebc680f5dd9899cd42b58629218a5f041efa899151a8e
           grep -F "fa0500f6b7e41d28791ebc680f5dd9899cd42b58629218a5f041efa899151a8e  gitleaks_${version}_linux_x64.tar.gz" \
-            "${checksums}" > "${RUNNER_TEMP}/gitleaks-expected.txt"
-          sha256sum --check "${RUNNER_TEMP}/gitleaks-expected.txt"
+            "${checksums}" >/dev/null
           tar -xzf "${archive}" -C "${RUNNER_TEMP}" gitleaks
           sudo install -m 0755 "${RUNNER_TEMP}/gitleaks" /usr/local/bin/gitleaks
           gitleaks version >/dev/null
@@ -314,7 +315,8 @@ jobs:
           }
           Push-Location multiplatform
           try {
-            .\gradlew.bat --no-daemon --console=plain :desktopApp:packageExe :desktopApp:packageMsi -PkinVersion=0.1.0
+            $env:ORG_GRADLE_PROJECT_kinVersion = "0.1.0"
+            .\gradlew.bat --no-daemon --console=plain :desktopApp:packageExe :desktopApp:packageMsi
           } finally {
             Pop-Location
           }
