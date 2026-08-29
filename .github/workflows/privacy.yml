@@ -1,0 +1,59 @@
+name: privacy-gate
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: privacy-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  privacy:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Checkout full history
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install OCR and gitleaks
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends tesseract-ocr tesseract-ocr-chi-sim
+          version=8.24.2
+          archive="${RUNNER_TEMP}/gitleaks.tar.gz"
+          checksums="${RUNNER_TEMP}/gitleaks-checksums.txt"
+          curl --fail --silent --show-error --location \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${version}/gitleaks_${version}_linux_x64.tar.gz" \
+            --output "${archive}"
+          curl --fail --silent --show-error --location \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${version}/gitleaks_${version}_checksums.txt" \
+            --output "${checksums}"
+          test "$(sha256sum "${checksums}" | cut -d' ' -f1)" = \
+            38c23e6c738df717d839cc73938ca135332b49c2dda435138164ff1241250938
+          grep -F "fa0500f6b7e41d28791ebc680f5dd9899cd42b58629218a5f041efa899151a8e  gitleaks_${version}_linux_x64.tar.gz" \
+            "${checksums}" > "${RUNNER_TEMP}/gitleaks-expected.txt"
+          sha256sum --check "${RUNNER_TEMP}/gitleaks-expected.txt"
+          tar -xzf "${archive}" -C "${RUNNER_TEMP}" gitleaks
+          sudo install -m 0755 "${RUNNER_TEMP}/gitleaks" /usr/local/bin/gitleaks
+          rm -f "${archive}" "${RUNNER_TEMP}/gitleaks"
+          gitleaks version >/dev/null
+          tesseract --version >/dev/null 2>&1
+
+      - name: Scan staged content
+        run: scripts/kin-privacy-gate.sh --staged --source-only --require-gitleaks
+
+      - name: Scan source working tree with OCR
+        run: scripts/kin-privacy-gate.sh --tree --source-only --release
+
+      - name: Scan every reachable Git ref
+        run: scripts/kin-privacy-gate.sh --all-refs --source-only --release

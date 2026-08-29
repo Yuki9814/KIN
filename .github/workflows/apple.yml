@@ -1,0 +1,77 @@
+name: apple-ci
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: apple-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  apple:
+    runs-on: macos-26
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Select Xcode 26.6
+        shell: bash
+        run: |
+          set -euo pipefail
+          xcode_app="$(find /Applications -maxdepth 1 -type d -name "Xcode_26.6*.app" -print -quit)"
+          if [ -z "$xcode_app" ] && [ -d /Applications/Xcode.app ]; then
+            xcode_app=/Applications/Xcode.app
+          fi
+          if [ -z "$xcode_app" ]; then
+            echo "::error::Xcode 26.6 is required on the macos-26 runner."
+            exit 1
+          fi
+          xcode_version="$($xcode_app/Contents/Developer/usr/bin/xcodebuild -version | sed -n '1p')"
+          case "$xcode_version" in
+            "Xcode 26.6"*) ;;
+            *) echo "::error::Expected Xcode 26.6, got an unsupported toolchain."; exit 1 ;;
+          esac
+          echo "DEVELOPER_DIR=$xcode_app/Contents/Developer" >> "$GITHUB_ENV"
+          "$xcode_app/Contents/Developer/usr/bin/xcodebuild" -version
+
+      - name: Build and test macOS without signing
+        shell: bash
+        run: |
+          set -euo pipefail
+          derived="$RUNNER_TEMP/kin-apple-ci"
+          xcodebuild -project Ayane.xcodeproj -scheme AyaneMac -configuration Debug \
+            -destination "platform=macOS,arch=arm64" -derivedDataPath "$derived" test \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY=- \
+            DEVELOPMENT_TEAM= KIN_DEVELOPMENT_TEAM= \
+            KIN_MAC_BUNDLE_IDENTIFIER=com.example.kin.macos \
+            KIN_IOS_BUNDLE_IDENTIFIER=com.example.kin.ios \
+            KIN_TEST_BUNDLE_IDENTIFIER=com.example.kin.tests \
+            KIN_CLOUDKIT_CONTAINER=iCloud.com.example.kin \
+            KIN_MAC_ENTITLEMENTS=Configuration/Ayane-macOS.entitlements.example \
+            KIN_IOS_ENTITLEMENTS=Configuration/Ayane-iOS.entitlements.example \
+            KIN_SOURCE_REVISION=public-ci
+
+      - name: Build iOS Simulator without signing
+        shell: bash
+        run: |
+          set -euo pipefail
+          derived="$RUNNER_TEMP/kin-ios-simulator-ci"
+          xcodebuild -project Ayane.xcodeproj -scheme AyaneiOS -configuration Debug \
+            -destination "generic/platform=iOS Simulator" -derivedDataPath "$derived" build \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY=- \
+            DEVELOPMENT_TEAM= KIN_DEVELOPMENT_TEAM= \
+            KIN_MAC_BUNDLE_IDENTIFIER=com.example.kin.macos \
+            KIN_IOS_BUNDLE_IDENTIFIER=com.example.kin.ios \
+            KIN_TEST_BUNDLE_IDENTIFIER=com.example.kin.tests \
+            KIN_CLOUDKIT_CONTAINER=iCloud.com.example.kin \
+            KIN_MAC_ENTITLEMENTS=Configuration/Ayane-macOS.entitlements.example \
+            KIN_IOS_ENTITLEMENTS=Configuration/Ayane-iOS.entitlements.example \
+            KIN_SOURCE_REVISION=public-ci

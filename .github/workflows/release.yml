@@ -1,0 +1,453 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  RELEASE_TAG: ${{ github.ref_name }}
+
+jobs:
+  source-gate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout full history
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Validate immutable release tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_REF_TYPE" != "tag" ]]; then
+            echo "::error::Releases must run from a pushed tag."
+            exit 1
+          fi
+          if [[ ! "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Release tag must use the exact vMAJOR.MINOR.PATCH form."
+            exit 1
+          fi
+          tag_commit="$(git rev-list -n 1 "$RELEASE_TAG")"
+          if [[ "$tag_commit" != "$GITHUB_SHA" ]]; then
+            echo "::error::Release tag does not resolve to the workflow commit."
+            exit 1
+          fi
+
+      - name: Install OCR and pinned gitleaks
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends tesseract-ocr tesseract-ocr-chi-sim
+          version=8.24.2
+          archive="${RUNNER_TEMP}/gitleaks.tar.gz"
+          checksums="${RUNNER_TEMP}/gitleaks-checksums.txt"
+          curl --fail --silent --show-error --location \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${version}/gitleaks_${version}_linux_x64.tar.gz" \
+            --output "${archive}"
+          curl --fail --silent --show-error --location \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${version}/gitleaks_${version}_checksums.txt" \
+            --output "${checksums}"
+          test "$(sha256sum "${checksums}" | cut -d' ' -f1)" = \
+            38c23e6c738df717d839cc73938ca135332b49c2dda435138164ff1241250938
+          grep -F "fa0500f6b7e41d28791ebc680f5dd9899cd42b58629218a5f041efa899151a8e  gitleaks_${version}_linux_x64.tar.gz" \
+            "${checksums}" > "${RUNNER_TEMP}/gitleaks-expected.txt"
+          sha256sum --check "${RUNNER_TEMP}/gitleaks-expected.txt"
+          tar -xzf "${archive}" -C "${RUNNER_TEMP}" gitleaks
+          sudo install -m 0755 "${RUNNER_TEMP}/gitleaks" /usr/local/bin/gitleaks
+          gitleaks version >/dev/null
+
+      - name: Scan all reachable refs
+        run: scripts/kin-privacy-gate.sh --all-refs --source-only --release
+
+  apple:
+    needs: source-gate
+    runs-on: macos-26
+    timeout-minutes: 70
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Select Xcode 26.6
+        shell: bash
+        run: |
+          set -euo pipefail
+          xcode_app="$(find /Applications -maxdepth 1 -type d -name "Xcode_26.6*.app" -print -quit)"
+          if [ -z "$xcode_app" ] && [ -d /Applications/Xcode.app ]; then
+            xcode_app=/Applications/Xcode.app
+          fi
+          if [ -z "$xcode_app" ]; then
+            echo "::error::Xcode 26.6 is required on the macos-26 runner."
+            exit 1
+          fi
+          xcode_version="$("$xcode_app/Contents/Developer/usr/bin/xcodebuild" -version | sed -n '1p')"
+          case "$xcode_version" in
+            "Xcode 26.6"*) ;;
+            *) echo "::error::Expected Xcode 26.6, got an unsupported toolchain."; exit 1 ;;
+          esac
+          echo "DEVELOPER_DIR=$xcode_app/Contents/Developer" >> "$GITHUB_ENV"
+
+      - name: Build unsigned Apple packages
+        shell: bash
+        run: |
+          set -euo pipefail
+          release="$RUNNER_TEMP/kin-apple-release"
+          mkdir -p "$release"
+          common_settings=(
+            CODE_SIGNING_ALLOWED=NO
+            CODE_SIGNING_REQUIRED=NO
+            AD_HOC_CODE_SIGNING_ALLOWED=NO
+            CODE_SIGN_IDENTITY=-
+            DEVELOPMENT_TEAM=
+            KIN_DEVELOPMENT_TEAM=
+            KIN_MAC_BUNDLE_IDENTIFIER=com.example.kin.macos
+            KIN_IOS_BUNDLE_IDENTIFIER=com.example.kin.ios
+            KIN_TEST_BUNDLE_IDENTIFIER=com.example.kin.tests
+            KIN_CLOUDKIT_CONTAINER=iCloud.com.example.kin
+            KIN_MAC_ENTITLEMENTS=Configuration/Ayane-macOS.entitlements.example
+            KIN_IOS_ENTITLEMENTS=Configuration/Ayane-iOS.entitlements.example
+            KIN_SOURCE_REVISION=public-release
+          )
+
+          mac_derived="$RUNNER_TEMP/kin-macos-release"
+          xcodebuild -project Ayane.xcodeproj -scheme AyaneMac -configuration Release \
+            -destination "platform=macOS,arch=arm64" -derivedDataPath "$mac_derived" build \
+            "${common_settings[@]}"
+          mac_apps=()
+          while IFS= read -r app; do
+            if [ -n "$app" ]; then mac_apps[${#mac_apps[@]}]="$app"; fi
+          done < <(find "$mac_derived/Build/Products" -type d -name "*.app" -print)
+          [ "${#mac_apps[@]}" -eq 1 ] || { echo "::error::exactly one macOS app is required"; exit 1; }
+          mac_app="${mac_apps[0]}"
+          [ -f "$mac_app/Contents/Info.plist" ] || { echo "::error::macOS Info.plist is missing"; exit 1; }
+          plutil -replace CFBundleIdentifier -string com.example.kin.macos "$mac_app/Contents/Info.plist"
+          scripts/kin-release-asset-gate.sh --app-only "$mac_app" --expected-bundle-id com.example.kin.macos
+          dmg_root="$RUNNER_TEMP/kin-dmg-root"
+          mkdir -p "$dmg_root"
+          cp -R "$mac_app" "$dmg_root/KIN.app"
+          hdiutil create -quiet -volname KIN -srcfolder "$dmg_root" -ov -format UDZO "$release/KIN-macos.dmg"
+          scripts/kin-release-asset-gate.sh --dmg-only "$release/KIN-macos.dmg" --expected-bundle-id com.example.kin.macos
+
+          ios_derived="$RUNNER_TEMP/kin-ios-device-release"
+          xcodebuild -project Ayane.xcodeproj -scheme AyaneiOS -configuration Release -sdk iphoneos \
+            -destination "generic/platform=iOS" -derivedDataPath "$ios_derived" build \
+            "${common_settings[@]}"
+          ios_apps=()
+          while IFS= read -r app; do
+            if [ -n "$app" ]; then ios_apps[${#ios_apps[@]}]="$app"; fi
+          done < <(find "$ios_derived/Build/Products" -type d -name "*.app" -print)
+          [ "${#ios_apps[@]}" -eq 1 ] || { echo "::error::exactly one iOS app is required"; exit 1; }
+          ios_app="${ios_apps[0]}"
+          [ -f "$ios_app/Info.plist" ] || { echo "::error::iOS Info.plist is missing"; exit 1; }
+          plutil -replace CFBundleIdentifier -string com.example.kin.ios "$ios_app/Info.plist"
+          ipa_root="$RUNNER_TEMP/kin-ipa-root"
+          mkdir -p "$ipa_root/Payload"
+          cp -R "$ios_app" "$ipa_root/Payload/KIN.app"
+          (cd "$ipa_root" && /usr/bin/zip -qry "$release/KIN-ios-unsigned.ipa" Payload)
+
+          sim_derived="$RUNNER_TEMP/kin-ios-simulator-release"
+          xcodebuild -project Ayane.xcodeproj -scheme AyaneiOS -configuration Release -sdk iphonesimulator \
+            -destination "generic/platform=iOS Simulator" -derivedDataPath "$sim_derived" build \
+            "${common_settings[@]}"
+          sim_apps=()
+          while IFS= read -r app; do
+            if [ -n "$app" ]; then sim_apps[${#sim_apps[@]}]="$app"; fi
+          done < <(find "$sim_derived/Build/Products" -type d -name "*.app" -print)
+          [ "${#sim_apps[@]}" -eq 1 ] || { echo "::error::exactly one Simulator app is required"; exit 1; }
+          sim_app="${sim_apps[0]}"
+          [ -f "$sim_app/Info.plist" ] || { echo "::error::Simulator Info.plist is missing"; exit 1; }
+          plutil -replace CFBundleIdentifier -string com.example.kin.ios "$sim_app/Info.plist"
+          sim_root="$RUNNER_TEMP/kin-sim-root"
+          mkdir -p "$sim_root"
+          cp -R "$sim_app" "$sim_root/KIN.app"
+          ditto -c -k --norsrc --keepParent "$sim_root/KIN.app" "$release/KIN-ios-simulator.zip"
+
+      - name: Upload Apple packages
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: kin-apple-release-assets
+          if-no-files-found: error
+          retention-days: 7
+          path: |
+            ${{ runner.temp }}/kin-apple-release/KIN-macos.dmg
+            ${{ runner.temp }}/kin-apple-release/KIN-ios-unsigned.ipa
+            ${{ runner.temp }}/kin-apple-release/KIN-ios-simulator.zip
+
+  android:
+    needs: source-gate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 50
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3
+
+      - name: Build unsigned Android release APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          sdkmanager "platform-tools" "platforms;android-36" "build-tools;36.0.0" >/dev/null
+          test -x multiplatform/gradlew
+          (cd multiplatform && ./gradlew --no-daemon --console=plain :androidApp:assembleRelease -PkinReleaseUnsigned=true)
+          mapfile -t apks < <(find multiplatform/androidApp/build/outputs/apk/release -maxdepth 1 -type f -name "*.apk" -print)
+          [ "${#apks[@]}" -eq 1 ] || { echo "::error::exactly one unsigned Android release APK is required"; exit 1; }
+          aapt="$ANDROID_HOME/build-tools/36.0.0/aapt"
+          "$aapt" dump badging "${apks[0]}" | grep -F "package: name='app.kin.android' versionCode='1' versionName='0.1.0'" >/dev/null
+          release="$RUNNER_TEMP/kin-android-unsigned"
+          mkdir -p "$release"
+          cp "${apks[0]}" "$release/KIN-android-unsigned.apk"
+
+      - name: Upload unsigned Android artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: kin-android-unsigned-assets
+          if-no-files-found: error
+          retention-days: 7
+          path: ${{ runner.temp }}/kin-android-unsigned/KIN-android-unsigned.apk
+
+  android-sign:
+    needs: android
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    environment:
+      name: release-signing
+    steps:
+      - name: Download unsigned Android artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: kin-android-unsigned-assets
+          path: ${{ runner.temp }}/kin-android-unsigned-input
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3
+
+      - name: Sign and verify with official build-tools
+        shell: bash
+        env:
+          ANDROID_RELEASE_KEYSTORE_BASE64: ${{ secrets.ANDROID_RELEASE_KEYSTORE_BASE64 }}
+          ANDROID_RELEASE_STORE_PASSWORD: ${{ secrets.ANDROID_RELEASE_STORE_PASSWORD }}
+          ANDROID_RELEASE_KEY_ALIAS: ${{ secrets.ANDROID_RELEASE_KEY_ALIAS }}
+          ANDROID_RELEASE_KEY_PASSWORD: ${{ secrets.ANDROID_RELEASE_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          umask 077
+          sdkmanager "platform-tools" "platforms;android-36" "build-tools;36.0.0" >/dev/null
+          mapfile -t unsigned < <(find "$RUNNER_TEMP/kin-android-unsigned-input" -type f -name "KIN-android-unsigned.apk" -print)
+          [ "${#unsigned[@]}" -eq 1 ] || { echo "::error::exactly one unsigned APK artifact is required"; exit 1; }
+          test -n "${ANDROID_RELEASE_KEYSTORE_BASE64:-}"
+          test -n "${ANDROID_RELEASE_STORE_PASSWORD:-}"
+          test -n "${ANDROID_RELEASE_KEY_ALIAS:-}"
+          test -n "${ANDROID_RELEASE_KEY_PASSWORD:-}"
+          keystore="$RUNNER_TEMP/kin-release.keystore"
+          printf "%s" "$ANDROID_RELEASE_KEYSTORE_BASE64" | base64 --decode > "$keystore"
+          chmod 600 "$keystore"
+          aligned="$RUNNER_TEMP/kin-android-aligned.apk"
+          signed_dir="$RUNNER_TEMP/kin-android-signed"
+          mkdir -p "$signed_dir"
+          zipalign="$ANDROID_HOME/build-tools/36.0.0/zipalign"
+          apksigner="$ANDROID_HOME/build-tools/36.0.0/apksigner"
+          "$zipalign" -p -f 4 "${unsigned[0]}" "$aligned"
+          "$apksigner" sign --ks "$keystore" \
+            --ks-pass "pass:$ANDROID_RELEASE_STORE_PASSWORD" \
+            --ks-key-alias "$ANDROID_RELEASE_KEY_ALIAS" \
+            --key-pass "pass:$ANDROID_RELEASE_KEY_PASSWORD" \
+            --out "$signed_dir/KIN-android.apk" "$aligned" >/dev/null
+          "$ANDROID_HOME/build-tools/36.0.0/aapt" dump badging "$signed_dir/KIN-android.apk" | \
+            grep -F "package: name='app.kin.android' versionCode='1' versionName='0.1.0'" >/dev/null
+          "$apksigner" verify --verbose --print-certs "$signed_dir/KIN-android.apk" >/dev/null
+
+      - name: Upload signed Android artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: kin-android-release-assets
+          if-no-files-found: error
+          retention-days: 7
+          path: ${{ runner.temp }}/kin-android-signed/KIN-android.apk
+
+  windows:
+    needs: source-gate
+    runs-on: windows-2025
+    timeout-minutes: 50
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Build Windows MSI and EXE
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $release = Join-Path $env:RUNNER_TEMP "kin-windows-release"
+          New-Item -ItemType Directory -Force -Path $release | Out-Null
+          if (-not (Test-Path "multiplatform/gradlew.bat")) {
+            throw "multiplatform/gradlew.bat is required for the Windows release"
+          }
+          Push-Location multiplatform
+          try {
+            .\gradlew.bat --no-daemon --console=plain :desktopApp:packageExe :desktopApp:packageMsi -PkinVersion=0.1.0
+          } finally {
+            Pop-Location
+          }
+          $msiDir = "multiplatform/desktopApp/build/compose/binaries/main/msi"
+          $exeDir = "multiplatform/desktopApp/build/compose/binaries/main/exe"
+          $msiCandidates = @(Get-ChildItem -LiteralPath $msiDir -Filter "*.msi" -File -ErrorAction Stop)
+          $exeCandidates = @(Get-ChildItem -LiteralPath $exeDir -Filter "*.exe" -File -ErrorAction Stop)
+          if ($msiCandidates.Count -ne 1 -or $exeCandidates.Count -ne 1) {
+            throw "Windows release requires exactly one MSI and one EXE in their explicit output directories"
+          }
+          Copy-Item -LiteralPath $msiCandidates[0].FullName -Destination (Join-Path $release "KIN-windows.msi")
+          Copy-Item -LiteralPath $exeCandidates[0].FullName -Destination (Join-Path $release "KIN-windows.exe")
+          foreach ($path in @((Join-Path $release "KIN-windows.msi"), (Join-Path $release "KIN-windows.exe"))) {
+            if ((Get-Item -LiteralPath $path).Length -le 0) { throw "Windows release artifact is empty" }
+            $signature = Get-AuthenticodeSignature -LiteralPath $path
+            if ($signature.Status -eq "Error") { throw "Windows Authenticode inspection failed" }
+          }
+          python scripts/kin-release-asset-gate.py --windows-only (Join-Path $release "KIN-windows.msi") (Join-Path $release "KIN-windows.exe")
+
+      - name: Upload Windows artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: kin-windows-release-assets
+          if-no-files-found: error
+          retention-days: 7
+          path: |
+            ${{ runner.temp }}/kin-windows-release/KIN-windows.msi
+            ${{ runner.temp }}/kin-windows-release/KIN-windows.exe
+
+  release-assets-gate:
+    needs: [apple, android-sign, windows]
+    runs-on: macos-26
+    timeout-minutes: 45
+    steps:
+      - name: Checkout gate implementation
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Android build-tools
+        uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: kin-*-release-assets
+          path: ${{ runner.temp }}/kin-release-input
+          merge-multiple: false
+
+      - name: Assemble and validate exact public assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          sdkmanager "platform-tools" "platforms;android-36" "build-tools;36.0.0" >/dev/null
+          input="$RUNNER_TEMP/kin-release-input"
+          release="$RUNNER_TEMP/kin-release-assets"
+          mkdir -p "$release"
+          for spec in \
+            "kin-apple-release-assets KIN-macos.dmg" \
+            "kin-apple-release-assets KIN-ios-unsigned.ipa" \
+            "kin-apple-release-assets KIN-ios-simulator.zip" \
+            "kin-android-release-assets KIN-android.apk" \
+            "kin-windows-release-assets KIN-windows.msi" \
+            "kin-windows-release-assets KIN-windows.exe"; do
+            artifact="${spec%% *}"
+            name="${spec#* }"
+          matches=()
+          while IFS= read -r match; do
+            if [ -n "$match" ]; then matches[${#matches[@]}]="$match"; fi
+          done < <(find "$input/$artifact" -type f -name "$name" -print)
+            [ "${#matches[@]}" -eq 1 ] || { echo "::error::expected exactly one $name from $artifact"; exit 1; }
+            cp "${matches[0]}" "$release/$name"
+          done
+          (cd "$release" && sha256sum \
+            KIN-macos.dmg KIN-ios-unsigned.ipa KIN-ios-simulator.zip \
+            KIN-android.apk KIN-windows.msi KIN-windows.exe > SHA256SUMS)
+          scripts/kin-release-asset-gate.sh --require-ocr \
+            "$release/KIN-macos.dmg" \
+            "$release/KIN-ios-unsigned.ipa" \
+            "$release/KIN-ios-simulator.zip" \
+            "$release/KIN-android.apk" \
+            "$release/KIN-windows.msi" \
+            "$release/KIN-windows.exe" \
+            "$release/SHA256SUMS"
+
+      - name: Upload validated release assets
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: kin-release-validated-assets
+          if-no-files-found: error
+          retention-days: 7
+          path: ${{ runner.temp }}/kin-release-assets/*
+
+  publish:
+    needs: [source-gate, release-assets-gate]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    steps:
+      - name: Download only validated assets
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: kin-release-validated-assets
+          path: ${{ runner.temp }}/kin-release-publish
+
+      - name: Publish GitHub Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          input="$RUNNER_TEMP/kin-release-publish"
+          release="$RUNNER_TEMP/kin-release-final"
+          mkdir -p "$release"
+          for name in \
+            KIN-macos.dmg KIN-ios-unsigned.ipa KIN-ios-simulator.zip \
+            KIN-android.apk KIN-windows.msi KIN-windows.exe SHA256SUMS; do
+            mapfile -t matches < <(find "$input" -type f -name "$name" -print)
+            [ "${#matches[@]}" -eq 1 ] || { echo "::error::validated asset count is not exactly one for $name"; exit 1; }
+            cp "${matches[0]}" "$release/$name"
+          done
+          (cd "$release" && sha256sum -c SHA256SUMS >/dev/null)
+          release_args=(
+            "$release/KIN-macos.dmg"
+            "$release/KIN-ios-unsigned.ipa"
+            "$release/KIN-ios-simulator.zip"
+            "$release/KIN-android.apk"
+            "$release/KIN-windows.msi"
+            "$release/KIN-windows.exe"
+            "$release/SHA256SUMS"
+            --title "KIN $RELEASE_TAG"
+            --notes "公开构建：macOS DMG 未公证；iOS IPA 无签名、需自行重签；Windows 包未使用个人证书；Android APK 在受保护的 release-signing 环境中签名。请先核验 SHA256SUMS。"
+          )
+          release_args+=(--verify-tag)
+          gh release create "$RELEASE_TAG" "${release_args[@]}"

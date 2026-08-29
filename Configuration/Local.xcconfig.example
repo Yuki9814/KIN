@@ -1,0 +1,13 @@
+// Copy this file to Configuration/Local.xcconfig (ignored) and fill in the
+// values for the Apple account used for a local, in-place install.
+// Never commit the copied file or put account values in tracked configuration.
+
+KIN_DEVELOPMENT_TEAM = YOUR_TEAM_ID
+KIN_IOS_BUNDLE_IDENTIFIER = com.example.kin.local.ios
+KIN_MAC_BUNDLE_IDENTIFIER = com.example.kin.local.mac
+KIN_TEST_BUNDLE_IDENTIFIER = com.example.kin.local.tests
+KIN_CLOUDKIT_CONTAINER = iCloud.com.example.kin.local
+KIN_APS_ENVIRONMENT = development
+KIN_SOURCE_REVISION = local-override
+KIN_CODE_SIGNING_ALLOWED = YES
+KIN_CODE_SIGNING_REQUIRED = YES

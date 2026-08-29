@@ -1,0 +1,22 @@
+// Public, reproducible defaults for KIN builds.
+//
+// A developer may create the ignored Configuration/Local.xcconfig file to
+// override these values for an in-place signed install. CI and public release
+// jobs should use these neutral defaults and pass CODE_SIGNING_ALLOWED=NO.
+
+KIN_DEVELOPMENT_TEAM =
+KIN_IOS_BUNDLE_IDENTIFIER = com.example.kin.ios
+KIN_MAC_BUNDLE_IDENTIFIER = com.example.kin.mac
+KIN_TEST_BUNDLE_IDENTIFIER = com.example.kin.tests
+KIN_CLOUDKIT_CONTAINER = iCloud.com.example.kin
+KIN_APS_ENVIRONMENT = development
+KIN_SOURCE_REVISION = public-source-v1
+KIN_CODE_SIGNING_ALLOWED = NO
+KIN_CODE_SIGNING_REQUIRED = NO
+KIN_IOS_ENTITLEMENTS = Configuration/Ayane-iOS.entitlements.example
+KIN_MAC_ENTITLEMENTS = Configuration/Ayane-macOS.entitlements.example
+CODE_SIGNING_ALLOWED = $(KIN_CODE_SIGNING_ALLOWED)
+CODE_SIGNING_REQUIRED = $(KIN_CODE_SIGNING_REQUIRED)
+
+// This file is intentionally safe to commit. Local.xcconfig is ignored.
+#include? "Local.xcconfig"

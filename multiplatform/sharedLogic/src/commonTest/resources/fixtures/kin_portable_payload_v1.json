@@ -1,0 +1,71 @@
+{
+  "format": "KINPortableArchiveV1",
+  "schemaVersion": 1,
+  "exportId": "fixture-kmp-v1",
+  "roles": [
+    {
+      "id": "88888888-8888-4888-8888-888888888888",
+      "displayName": "测试角色",
+      "systemPrompt": "这是一个公开测试角色。",
+      "avatarKey": null,
+      "isBuiltIn": false,
+      "createdAtMillis": 1724889600000,
+      "isArchived": false
+    }
+  ],
+  "relationships": [
+    {
+      "roleId": "88888888-8888-4888-8888-888888888888",
+      "stage": "FRIEND",
+      "affinity": 45,
+      "updatedAtMillis": 1724889601000
+    }
+  ],
+  "chatEvents": [
+    {
+      "id": "99999999-9999-4999-8999-999999999999",
+      "roleId": "88888888-8888-4888-8888-888888888888",
+      "conversationId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "author": "USER",
+      "kind": "MESSAGE",
+      "status": "SENT",
+      "body": "fixture message",
+      "createdAtMillis": 1724889602000,
+      "sequence": 1,
+      "parentEventId": null,
+      "attachmentRefs": [],
+      "errorCode": null,
+      "errorMessage": null
+    }
+  ],
+  "memories": [
+    {
+      "id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+      "roleId": "88888888-8888-4888-8888-888888888888",
+      "text": "fixture memory",
+      "confidence": 0.9,
+      "createdAtMillis": 1724889603000,
+      "updatedAtMillis": 1724889603000,
+      "isTombstoned": false
+    }
+  ],
+  "settings": {
+    "theme": "SYSTEM",
+    "endpoint": "https://example.invalid/v1/chat/completions",
+    "model": "fixture-model",
+    "sendOnEnter": true
+  },
+  "attachments": [
+    {
+      "metadata": {
+        "id": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+        "fileName": "fixture.txt",
+        "mimeType": "text/plain",
+        "byteSize": 5,
+        "sha256": "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824",
+        "createdAtMillis": 1724889604000
+      },
+      "contentHex": "68656c6c6f"
+    }
+  ]
+}
