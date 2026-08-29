@@ -404,7 +404,7 @@ jobs:
             [ "${#matches[@]}" -eq 1 ] || { echo "::error::expected exactly one $name from $artifact"; exit 1; }
             cp "${matches[0]}" "$release/$name"
           done
-          (cd "$release" && sha256sum \
+          (cd "$release" && shasum -a 256 \
             KIN-macos.dmg KIN-ios-unsigned.ipa KIN-ios-simulator.zip \
             KIN-android.apk KIN-windows.msi KIN-windows.exe > SHA256SUMS)
           scripts/kin-release-asset-gate.sh --require-ocr \
