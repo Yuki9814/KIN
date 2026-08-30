@@ -61,7 +61,7 @@ AyaneDataExport schema versions 4 through 16 as a one-way input adapter:
 - Sanitized HTTPS provider URL/model values may be retained as display
   settings; credentials and OAuth state are never imported.
 - Apple-only evidence, summaries, Moments, groups, proactive tasks, world
-  profiles and account/device fields are ignored because KMP 0.1.0 has no
+  profiles and account/device fields are ignored because KMP 0.1.4 has no
   corresponding model.
 
 The reverse direction requires a Swift bridge that maps this canonical object

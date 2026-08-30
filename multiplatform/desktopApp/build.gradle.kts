@@ -10,7 +10,8 @@ val kinVersion = project.version.toString()
 // Keep Gradle/application metadata at kinVersion while mapping only that
 // platform-specific installer field to a valid positive release version.
 val nativePackageVersion = if (kinVersion.substringBefore('.').toIntOrNull() == 0) {
-    "1.0.0"
+    val components = kinVersion.split('.')
+    "1.${components.getOrElse(1) { "0" }}.${components.getOrElse(2) { "0" }}"
 } else {
     kinVersion
 }

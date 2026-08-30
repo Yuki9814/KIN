@@ -37,7 +37,7 @@ jobs:
           }
           Push-Location multiplatform
           try {
-            $env:ORG_GRADLE_PROJECT_kinVersion = "0.1.0"
+            $env:ORG_GRADLE_PROJECT_kinVersion = "0.1.4"
             .\gradlew.bat --no-daemon --console=plain test :desktopApp:packageExe :desktopApp:packageMsi
           } finally {
             Pop-Location

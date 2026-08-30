@@ -32,7 +32,7 @@ android {
         applicationId = "app.kin.android"
         minSdk = libs.versions.minSdk.get().toInt()
         targetSdk = libs.versions.targetSdk.get().toInt()
-        versionCode = 1
+        versionCode = 4
         versionName = project.version.toString()
     }
 

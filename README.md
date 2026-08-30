@@ -2,6 +2,8 @@
 
 KIN 是一个公开源码的跨端 AI 关系伴侣项目。Apple 端使用 SwiftUI 与 SwiftData；Android 与 Windows 端使用 Kotlin Multiplatform/Compose。项目的默认内置角色只有绫音，角色、关系、聊天事件与长期记忆均按稳定标识隔离。
 
+当前应用版本为 `0.1.4`：Apple 构建号 `30`，Android `versionCode 4`；Windows 应用显示版本同为 `0.1.4`，仅因 jpackage 不接受主版本号 0，MSI/EXE 的原生安装器字段映射为 `1.1.4`。
+
 仓库地址：[Yuki9814/KIN](https://github.com/Yuki9814/KIN)。源码、构建产物、签名材料、真实 provider 凭据、设备数据和本机日志不混在一起；二进制只在 GitHub Release 生成，不提交到 Git。
 
 ## 状态与边界
@@ -34,7 +36,7 @@ KIN 是一个公开源码的跨端 AI 关系伴侣项目。Apple 端使用 Swift
 | `KIN-macos.dmg` | macOS 安装镜像 | 未公证、未绑定个人 Team；首次打开可能需要在系统设置中确认 |
 | `KIN-ios-unsigned.ipa` | iOS 真机重签输入包 | 无签名、不能直接安装；必须使用自己的 Team、Bundle 和 provisioning profile 重签 |
 | `KIN-ios-simulator.zip` | iOS Simulator 包 | 无个人签名；解压后用 Simulator 安装 |
-| `KIN-android.apk` | Android 安装包 | 不代表 Play 商店签名；请只从项目 Release 下载并核对哈希 |
+| `KIN-android.apk` | Android 安装包 | 使用项目 Release key 签名，但不是 Play / Play App Signing 包；下载后核对哈希 |
 | `KIN-windows.msi` | Windows 安装包 | 未使用个人证书；SmartScreen 可能提示未知发布者 |
 | `KIN-windows.exe` | Windows 便携安装包 | 未使用个人证书；运行前核对哈希 |
 | `SHA256SUMS` | 所有安装包的 SHA-256 清单 | Release 门禁会逐项校验 |
@@ -50,6 +52,8 @@ KIN 是一个公开源码的跨端 AI 关系伴侣项目。Apple 端使用 Swift
 - Windows：双击 `KIN-windows.msi` 按向导安装，或运行 `KIN-windows.exe`；安装包未使用个人证书，SmartScreen 显示未知发布者属于预期边界。确认来源和哈希后再选择继续。
 
 Release 资产会在构建阶段检查包布局、Bundle/Application ID、Mach-O、Android 签名、Windows x64 文件头以及归档条目/解压大小上限；通过这些检查不等于商店审核、公证或正式签名。
+
+`v0.1.3` 是启用 GitHub 不可变 Release 之前保留的历史构建，不会移动标签或替换附件。当前正式下载基线从 `v0.1.4` 开始：发布任务会在上传前再次确认远端标签解析到本次构建提交，发布后再确认 GitHub 已将 Release 标记为不可变。版本标签 `v0.1.4` 与应用显示版本 `0.1.4` 一致。
 
 下载后在 macOS/Linux 执行：
 

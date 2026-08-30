@@ -1,6 +1,6 @@
 # KIN 有灵：Android / Windows 核心版
 
-版本：`0.1.0`（Windows jpackage 原生版本字段规范化为 `1.0.0`，因为 jpackage 禁止以 0 开头）
+版本：`0.1.4`（Windows jpackage 原生安装器字段规范化为 `1.1.4`，因为 jpackage 禁止主版本号为 0；应用显示版本仍为 `0.1.4`）
 
 这是与 Apple 工程并列的 Kotlin Multiplatform 工程，固定目录为：
 

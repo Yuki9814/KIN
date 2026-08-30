@@ -38,6 +38,10 @@ jobs:
             echo "::error::Release tag must use the exact vMAJOR.MINOR.PATCH form."
             exit 1
           fi
+          if [[ "$RELEASE_TAG" != "v0.1.4" ]]; then
+            echo "::error::Release tag must match the application version declared by this source tree."
+            exit 1
+          fi
           tag_commit="$(git rev-list -n 1 "$RELEASE_TAG")"
           if [[ "$tag_commit" != "$GITHUB_SHA" ]]; then
             echo "::error::Release tag does not resolve to the workflow commit."
@@ -127,6 +131,7 @@ jobs:
           set -euo pipefail
           cd "$KIN_APPLE_SOURCE"
           release="$KIN_APPLE_RELEASE"
+          public_version="${RELEASE_TAG#v}"
           mkdir -p "$release"
           common_settings=(
             CODE_SIGNING_ALLOWED=NO
@@ -141,7 +146,9 @@ jobs:
             KIN_CLOUDKIT_CONTAINER=iCloud.com.example.kin
             KIN_MAC_ENTITLEMENTS=Configuration/Ayane-macOS.entitlements.example
             KIN_IOS_ENTITLEMENTS=Configuration/Ayane-iOS.entitlements.example
-            KIN_SOURCE_REVISION=public-release
+            KIN_SOURCE_REVISION="$GITHUB_SHA"
+            MARKETING_VERSION="$public_version"
+            CURRENT_PROJECT_VERSION=30
           )
 
           mac_derived="$KIN_APPLE_ROOT/macos-derived"
@@ -156,6 +163,9 @@ jobs:
           mac_app="${mac_apps[0]}"
           [ -f "$mac_app/Contents/Info.plist" ] || { echo "::error::macOS Info.plist is missing"; exit 1; }
           plutil -replace CFBundleIdentifier -string com.example.kin.macos "$mac_app/Contents/Info.plist"
+          test "$(plutil -extract CFBundleShortVersionString raw -o - "$mac_app/Contents/Info.plist")" = "$public_version"
+          test "$(plutil -extract CFBundleVersion raw -o - "$mac_app/Contents/Info.plist")" = "30"
+          test "$(plutil -extract KINSourceRevision raw -o - "$mac_app/Contents/Info.plist")" = "$GITHUB_SHA"
           scripts/kin-release-asset-gate.sh --app-only "$mac_app" --expected-bundle-id com.example.kin.macos
           dmg_root="$KIN_APPLE_ROOT/dmg-root"
           mkdir -p "$dmg_root"
@@ -175,6 +185,9 @@ jobs:
           ios_app="${ios_apps[0]}"
           [ -f "$ios_app/Info.plist" ] || { echo "::error::iOS Info.plist is missing"; exit 1; }
           plutil -replace CFBundleIdentifier -string com.example.kin.ios "$ios_app/Info.plist"
+          test "$(plutil -extract CFBundleShortVersionString raw -o - "$ios_app/Info.plist")" = "$public_version"
+          test "$(plutil -extract CFBundleVersion raw -o - "$ios_app/Info.plist")" = "30"
+          test "$(plutil -extract KINSourceRevision raw -o - "$ios_app/Info.plist")" = "$GITHUB_SHA"
           ipa_root="$KIN_APPLE_ROOT/ipa-root"
           mkdir -p "$ipa_root/Payload"
           cp -R "$ios_app" "$ipa_root/Payload/KIN.app"
@@ -192,6 +205,9 @@ jobs:
           sim_app="${sim_apps[0]}"
           [ -f "$sim_app/Info.plist" ] || { echo "::error::Simulator Info.plist is missing"; exit 1; }
           plutil -replace CFBundleIdentifier -string com.example.kin.ios "$sim_app/Info.plist"
+          test "$(plutil -extract CFBundleShortVersionString raw -o - "$sim_app/Info.plist")" = "$public_version"
+          test "$(plutil -extract CFBundleVersion raw -o - "$sim_app/Info.plist")" = "30"
+          test "$(plutil -extract KINSourceRevision raw -o - "$sim_app/Info.plist")" = "$GITHUB_SHA"
           sim_root="$KIN_APPLE_ROOT/sim-root"
           mkdir -p "$sim_root"
           cp -R "$sim_app" "$sim_root/KIN.app"
@@ -231,13 +247,15 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          public_version="${RELEASE_TAG#v}"
           sdkmanager "platform-tools" "platforms;android-36" "build-tools;36.0.0" >/dev/null
           test -x multiplatform/gradlew
-          (cd multiplatform && ./gradlew --no-daemon --console=plain :androidApp:assembleRelease -PkinReleaseUnsigned=true)
+          (cd multiplatform && ./gradlew --no-daemon --console=plain :androidApp:assembleRelease \
+            -PkinVersion="$public_version" -PkinReleaseUnsigned=true)
           mapfile -t apks < <(find multiplatform/androidApp/build/outputs/apk/release -maxdepth 1 -type f -name "*.apk" -print)
           [ "${#apks[@]}" -eq 1 ] || { echo "::error::exactly one unsigned Android release APK is required"; exit 1; }
           aapt="$ANDROID_HOME/build-tools/36.0.0/aapt"
-          "$aapt" dump badging "${apks[0]}" | grep -F "package: name='app.kin.android' versionCode='1' versionName='0.1.0'" >/dev/null
+          "$aapt" dump badging "${apks[0]}" | grep -F "package: name='app.kin.android' versionCode='4' versionName='$public_version'" >/dev/null
           release="$RUNNER_TEMP/kin-android-unsigned"
           mkdir -p "$release"
           cp "${apks[0]}" "$release/KIN-android-unsigned.apk"
@@ -276,6 +294,7 @@ jobs:
         run: |
           set -euo pipefail
           umask 077
+          public_version="${RELEASE_TAG#v}"
           sdkmanager "platform-tools" "platforms;android-36" "build-tools;36.0.0" >/dev/null
           mapfile -t unsigned < <(find "$RUNNER_TEMP/kin-android-unsigned-input" -type f -name "KIN-android-unsigned.apk" -print)
           [ "${#unsigned[@]}" -eq 1 ] || { echo "::error::exactly one unsigned APK artifact is required"; exit 1; }
@@ -298,7 +317,7 @@ jobs:
             --key-pass "pass:$ANDROID_RELEASE_KEY_PASSWORD" \
             --out "$signed_dir/KIN-android.apk" "$aligned" >/dev/null
           "$ANDROID_HOME/build-tools/36.0.0/aapt" dump badging "$signed_dir/KIN-android.apk" | \
-            grep -F "package: name='app.kin.android' versionCode='1' versionName='0.1.0'" >/dev/null
+            grep -F "package: name='app.kin.android' versionCode='4' versionName='$public_version'" >/dev/null
           "$apksigner" verify --verbose --print-certs "$signed_dir/KIN-android.apk" >/dev/null
 
       - name: Upload signed Android artifact
@@ -336,7 +355,7 @@ jobs:
           }
           Push-Location multiplatform
           try {
-            $env:ORG_GRADLE_PROJECT_kinVersion = "0.1.0"
+            $env:ORG_GRADLE_PROJECT_kinVersion = $env:RELEASE_TAG.Substring(1)
             .\gradlew.bat --no-daemon --console=plain :desktopApp:packageExe :desktopApp:packageMsi
           } finally {
             Pop-Location
@@ -475,6 +494,50 @@ jobs:
             cp "${matches[0]}" "$release/$name"
           done
           (cd "$release" && sha256sum -c SHA256SUMS >/dev/null)
+          fail_remote_tag() {
+            echo "::error::Remote release tag provenance check failed."
+            exit 1
+          }
+          if ! lookup="$(gh api \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2026-03-10" \
+            "repos/$GITHUB_REPOSITORY/git/ref/tags/$RELEASE_TAG" \
+            --jq '[.ref, .object.type // "", .object.sha // ""] | @tsv' \
+            2>/dev/null)"; then
+            fail_remote_tag
+          fi
+          IFS=$'\t' read -r ref_name remote_type remote_sha <<<"$lookup"
+          if [[ "$ref_name" != "refs/tags/$RELEASE_TAG" || -z "$remote_type" || -z "$remote_sha" ]]; then
+            fail_remote_tag
+          fi
+          depth=0
+          while :; do
+            case "$remote_type" in
+              commit)
+                peeled_commit="$remote_sha"
+                break
+                ;;
+              tag)
+                depth=$((depth + 1))
+                (( depth <= 8 )) || fail_remote_tag
+                if ! lookup="$(gh api \
+                  -H "Accept: application/vnd.github+json" \
+                  -H "X-GitHub-Api-Version: 2026-03-10" \
+                  "repos/$GITHUB_REPOSITORY/git/tags/$remote_sha" \
+                  --jq '[.object.type // "", .object.sha // ""] | @tsv' \
+                  2>/dev/null)"; then
+                  fail_remote_tag
+                fi
+                IFS=$'\t' read -r remote_type remote_sha <<<"$lookup"
+                [[ -n "$remote_type" && -n "$remote_sha" ]] || fail_remote_tag
+                ;;
+              *)
+                fail_remote_tag
+                ;;
+            esac
+          done
+          [[ "$peeled_commit" == "$GITHUB_SHA" ]] || fail_remote_tag
+          public_version="${RELEASE_TAG#v}"
           release_args=(
             "$release/KIN-macos.dmg"
             "$release/KIN-ios-unsigned.ipa"
@@ -484,7 +547,8 @@ jobs:
             "$release/KIN-windows.exe"
             "$release/SHA256SUMS"
             --title "KIN $RELEASE_TAG"
-            --notes "公开构建：macOS DMG 未公证；iOS IPA 无签名、需自行重签；Windows 包未使用个人证书；Android APK 在受保护的 release-signing 环境中签名。请先核验 SHA256SUMS。"
+            --notes "应用版本：$public_version（Apple Build 30，Android versionCode 4；Windows 安装器字段 1.1.4）。macOS DMG 未公证；iOS 真机 IPA 无签名，不能直接安装，需使用自己的 Apple Team、Bundle ID、证书和 provisioning profile 重签；iOS Simulator ZIP 仅供模拟器。Windows 包未使用个人证书；Android APK 在受保护的 release-signing 环境中签名。请先核验 SHA256SUMS。"
           )
           release_args+=(--verify-tag)
           gh release create --repo "$GITHUB_REPOSITORY" "$RELEASE_TAG" "${release_args[@]}"
+          test "$(gh release view --repo "$GITHUB_REPOSITORY" "$RELEASE_TAG" --json isImmutable --jq .isImmutable)" = "true"

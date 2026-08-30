@@ -99,8 +99,8 @@ LEGACY_ROLE_NAMES = (
 MAX_OCR_IMAGE_BYTES = 32 * 1024 * 1024
 ANDROID_REQUIRED_PACKAGE_FIELDS = {
     "name": "app.kin.android",
-    "versionCode": "1",
-    "versionName": "0.1.0",
+    "versionCode": "4",
+    "versionName": "0.1.4",
 }
 ANDROID_PACKAGE_FIELD_RE = re.compile(r"(?P<key>[A-Za-z][A-Za-z0-9_]*)='(?P<value>(?:\\.|[^'\\])*)'")
 PATTERNS = (
@@ -816,7 +816,7 @@ def _pe_findings(data: bytes) -> list[str]:
 
 
 def windows_asset_findings(path: Path, kind: str, require_version: bool = True) -> list[str]:
-    """Check Windows package headers and the public 0.1.0 version marker."""
+    """Check Windows package headers and the public 0.1.4 version marker."""
     try:
         data = path.read_bytes()
     except OSError:
@@ -833,9 +833,9 @@ def windows_asset_findings(path: Path, kind: str, require_version: bool = True) 
         findings.append("windows-format-unknown")
     if require_version:
         # jpackage/Compose may encode resource strings as UTF-16LE. Require a
-        # public 0.1.0 marker in either common representation; the workflow
-        # additionally checks ProductVersion through PowerShell on Windows.
-        if b"0.1.0" not in data and "0.1.0".encode("utf-16le") not in data:
+        # public 0.1.4 marker in either common representation; the workflow
+        # pins the same application version before jpackage creates both files.
+        if b"0.1.4" not in data and "0.1.4".encode("utf-16le") not in data:
             findings.append("windows-version-mismatch")
     return findings
 

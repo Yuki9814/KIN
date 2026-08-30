@@ -7,7 +7,8 @@
 - Git 中只保留源代码、测试、必要资源、配置模板、脚本、文档和 CI；构建产物、数据库、日志、录屏、签名文件、密钥和本机状态拒绝进入外发包。GIF 直接禁止进入源码导出和 Release 归档。
 - API Key、OAuth token 和 provider 响应不进入 Git、备份、CloudKit 或 CI 日志。公开 CI 只使用合成 fixture，不做真实 provider 验证。
 - Apple Personal Team 只允许个人设备上的短期 Debug；公开构建无签名，公开 Release 不携带个人 Team 或本地签名材料。
-- Release 页面只发布经过门禁的 macOS DMG、iOS unsigned IPA、iOS Simulator ZIP、Android APK、Windows MSI/EXE 和 `SHA256SUMS`。macOS 镜像未公证，iOS 真机包需自行重签，Windows 安装包未使用个人证书，Android 包不等同于商店签名。
+- Release 页面只发布经过门禁的 macOS DMG、iOS unsigned IPA、iOS Simulator ZIP、Android APK、Windows MSI/EXE 和 `SHA256SUMS`。macOS 镜像未公证，iOS 真机包需自行重签，Windows 安装包未使用个人证书，Android 包使用项目 Release key 但不等同于 Play / Play App Signing。
+- `v0.1.3` 保留为启用不可变 Release 之前的历史构建，不移动标签、不替换资产；从 `v0.1.4` 起，发布前会再次解析远端标签并要求其等于工作流提交，发布后必须确认 Release 已不可变。
 
 ## 门禁矩阵
 
