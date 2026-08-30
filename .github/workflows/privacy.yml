@@ -53,6 +53,9 @@ jobs:
       - name: Scan staged content
         run: scripts/kin-privacy-gate.sh --staged --source-only --require-gitleaks
 
+      - name: Test release asset scanner
+        run: python3 scripts/test-kin-release-asset-gate.py
+
       - name: Scan source working tree with OCR
         run: scripts/kin-privacy-gate.sh --tree --source-only --release
 

@@ -100,7 +100,11 @@ MAX_OCR_IMAGE_BYTES = 32 * 1024 * 1024
 PATTERNS = (
     ("private-key", re.compile(rb"-----BEGIN[ -](?:RSA |EC |OPENSSH |DSA |ENCRYPTED )?PRIVATE KEY-----", re.I)),
     ("absolute-user-path", re.compile(rb"/" + b"Users/" + rb"[^\s\"'`<>)]*", re.I)),
-    ("codex-path", re.compile(rb"/[^\s\"'`<>)]*/" + re.escape(b".codex") + rb"(?:/|[\s\"'])", re.I)),
+    # Searching the full prefix before `/.codex` is unnecessary: the unsafe
+    # suffix itself is sufficient evidence. Keeping the expression anchored
+    # on that literal makes the scan linear even for large Mach-O binaries
+    # containing many slash bytes, while also catching relative paths.
+    ("codex-path", re.compile(rb"/" + re.escape(b".codex") + rb"(?:/|[\s\"'])", re.I)),
     ("provider-key", re.compile(rb"(?:api[_ -]?key|access[_ -]?token|client[_ -]?secret|refresh[_ -]?token|oauth[_ -]?token)[ \t]*[:=][ \t]*[\"']?[A-Za-z0-9][A-Za-z0-9_~+/=-]{15,}", re.I)),
     ("bearer-token", re.compile(rb"Bearer[ \t]+[A-Za-z0-9._~+/=-]{20,}", re.I)),
     ("openai-key", re.compile(rb"(?<![A-Za-z0-9_-])" + re.escape(b"s" + b"k-") + rb"[A-Za-z0-9]{16,}")),

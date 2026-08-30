@@ -72,6 +72,9 @@ jobs:
       - name: Scan all reachable refs
         run: scripts/kin-privacy-gate.sh --all-refs --source-only --release
 
+      - name: Test release asset scanner
+        run: python3 scripts/test-kin-release-asset-gate.py
+
   apple:
     needs: source-gate
     runs-on: macos-26
