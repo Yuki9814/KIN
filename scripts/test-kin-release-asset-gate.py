@@ -60,5 +60,32 @@ class ReleaseAssetGateScanTests(unittest.TestCase):
         self.assertNotIn("codex-path", findings)
 
 
+class AndroidPackageMetadataTests(unittest.TestCase):
+    def test_aapt_extra_fields_are_allowed(self) -> None:
+        output = (
+            "package: name='app.kin.android' versionCode='1' versionName='0.1.0' "
+            "platformBuildVersionName='16' platformBuildVersionCode='36' "
+            "compileSdkVersion='36' compileSdkVersionCodename='16'\n"
+        )
+        self.assertTrue(GATE._android_package_metadata_valid(output))
+
+    def test_missing_wrong_or_duplicate_required_fields_are_rejected(self) -> None:
+        invalid_outputs = (
+            "package: name='app.kin.android' versionCode='1'\n",
+            "package: name='app.kin.other' versionCode='1' versionName='0.1.0'\n",
+            "package: name='app.kin.android' versionCode='1' versionName='0.1.0' "
+            "versionName='0.1.0'\n",
+            "package: name='app.kin.android' versionCode='1' versionName='0.1.0'\n"
+            "package: name='app.kin.android' versionCode='1' versionName='0.1.0'\n",
+        )
+        for output in invalid_outputs:
+            with self.subTest(output=output):
+                self.assertFalse(GATE._android_package_metadata_valid(output))
+
+    def test_package_pseudo_prefix_is_rejected(self) -> None:
+        output = "package:name='app.kin.android' versionCode='1' versionName='0.1.0'\n"
+        self.assertFalse(GATE._android_package_metadata_valid(output))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -97,6 +97,12 @@ LEGACY_ROLE_NAMES = (
     "".join(chr(value) for value in (0x70EC, 0x7483)),
 )
 MAX_OCR_IMAGE_BYTES = 32 * 1024 * 1024
+ANDROID_REQUIRED_PACKAGE_FIELDS = {
+    "name": "app.kin.android",
+    "versionCode": "1",
+    "versionName": "0.1.0",
+}
+ANDROID_PACKAGE_FIELD_RE = re.compile(r"(?P<key>[A-Za-z][A-Za-z0-9_]*)='(?P<value>(?:\\.|[^'\\])*)'")
 PATTERNS = (
     ("private-key", re.compile(rb"-----BEGIN[ -](?:RSA |EC |OPENSSH |DSA |ENCRYPTED )?PRIVATE KEY-----", re.I)),
     ("absolute-user-path", re.compile(rb"/" + b"Users/" + rb"[^\s\"'`<>)]*", re.I)),
@@ -720,6 +726,37 @@ def _android_tool(name: str) -> str | None:
     return str(candidates[0]) if candidates else None
 
 
+def _android_package_metadata_valid(output: str) -> bool:
+    """Require one well-formed aapt package line with exact KIN metadata."""
+    package_lines = [line for line in output.splitlines() if line.startswith("package:")]
+    if len(package_lines) != 1:
+        return False
+
+    line = package_lines[0]
+    prefix = "package:"
+    if len(line) == len(prefix) or line[len(prefix)] not in " \t":
+        return False
+
+    fields: dict[str, str] = {}
+    position = len(prefix)
+    while position < len(line):
+        while position < len(line) and line[position] in " \t":
+            position += 1
+        if position == len(line):
+            break
+        match = ANDROID_PACKAGE_FIELD_RE.match(line, position)
+        if match is None:
+            return False
+        key = match.group("key")
+        if key in ANDROID_REQUIRED_PACKAGE_FIELDS:
+            if key in fields:
+                return False
+            fields[key] = match.group("value")
+        position = match.end()
+
+    return fields == ANDROID_REQUIRED_PACKAGE_FIELDS
+
+
 def android_tool_findings(path: Path) -> list[str]:
     """Require Android SDK metadata and a valid cryptographic APK signature."""
     findings: list[str] = []
@@ -740,11 +777,8 @@ def android_tool_findings(path: Path) -> list[str]:
             result = None
         if result is None or result.returncode != 0:
             findings.append("android-aapt-failed")
-        else:
-            package_lines = [line for line in result.stdout.splitlines() if line.startswith("package:")]
-            expected = "package: name='app.kin.android' versionCode='1' versionName='0.1.0'"
-            if package_lines != [expected]:
-                findings.append("android-package-metadata")
+        elif not _android_package_metadata_valid(result.stdout):
+            findings.append("android-package-metadata")
     if not apksigner:
         findings.append("android-apksigner-missing")
     else:
