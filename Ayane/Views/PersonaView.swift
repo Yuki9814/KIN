@@ -137,7 +137,23 @@ struct PersonaView: View {
                     .onChange(of: prompt) { markDirty() }
                 Text(appModel.isCurrentRoleAffinityInfinite
                     ? "这里只定义角色身份、经历与说话方式，不再承载世界观。内置好友的好感度永久为 ∞ / 100。"
-                    : "这里只定义角色身份、经历与说话方式，不再承载世界观。好感度决定亲密程度与表达策略；达到 100 后进入绝对顺从。")
+                    : "这里只定义角色身份、经历与说话方式，不再承载世界观。好感度表示亲密、信任、熟悉与安全感；达到 100 也不会取消角色边界与判断力。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Section("角色卡与世界书") {
+                NavigationLink {
+                    CharacterCardImportView()
+                } label: {
+                    Label(
+                        "导入 Character Card",
+                        systemImage: "person.crop.rectangle.badge.plus"
+                    )
+                    .frame(minHeight: 36)
+                }
+
+                Text("支持 Character Card V1/V2 JSON。导入前会检查永久上下文、首条消息与内嵌世界书；创建者备注只在预览中显示，不会发送给模型。")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
