@@ -1,0 +1,139 @@
+{
+  "schema_version": 17,
+  "exported_at": "2026-08-30T00:00:00Z",
+  "profiles": [
+    {
+      "id": "8D5DFB45-198D-4B74-B1F1-4C9C7A8248A1",
+      "role_id": "8D5DFB45-198D-4B74-B1F1-4C9C7A8248A1",
+      "name": "绫音",
+      "user_name": "测试用户",
+      "prompt": "保持真诚、温柔、清醒。",
+      "created_at": "2026-08-29T00:00:00Z",
+      "updated_at": "2026-08-29T00:00:00Z"
+    },
+    {
+      "id": "11111111-1111-4111-8111-111111111111",
+      "role_id": "11111111-1111-4111-8111-111111111111",
+      "name": "测试角色",
+      "user_name": "测试用户",
+      "prompt": "这是一个公开测试角色。",
+      "created_at": "2026-08-29T00:00:00Z",
+      "updated_at": "2026-08-29T00:00:00Z"
+    }
+  ],
+  "persona": {
+    "id": "8D5DFB45-198D-4B74-B1F1-4C9C7A8248A1",
+    "role_id": "8D5DFB45-198D-4B74-B1F1-4C9C7A8248A1",
+    "name": "绫音",
+    "user_name": "测试用户",
+    "prompt": "保持真诚、温柔、清醒。",
+    "created_at": "2026-08-29T00:00:00Z",
+    "updated_at": "2026-08-29T00:00:00Z",
+    "revision": 1,
+    "device_id": ""
+  },
+  "relationships": [
+    {
+      "id": "12121212-1212-4121-8121-121212121212",
+      "role_id": "11111111-1111-4111-8111-111111111111",
+      "state_raw": "accepted",
+      "affinity_score": 75.0,
+      "updated_at": "2026-08-29T00:00:02Z"
+    }
+  ],
+  "events": [
+    {
+      "id": "22222222-2222-4222-8222-222222222222",
+      "role_id": "11111111-1111-4111-8111-111111111111",
+      "conversation_id": "33333333-3333-4333-8333-333333333333",
+      "role": "user",
+      "role_raw": "user",
+      "content": "hello",
+      "occurred_at": "2026-08-29T00:00:01Z",
+      "recorded_at": "2026-08-29T00:00:01Z",
+      "delivery_state": "complete"
+    }
+  ],
+  "memories": [],
+  "tombstones": [],
+  "conversations": [
+    {
+      "id": "33333333-3333-4333-8333-333333333333",
+      "role_id": "11111111-1111-4111-8111-111111111111",
+      "title": "测试会话",
+      "created_at": "2026-08-29T00:00:01Z",
+      "updated_at": "2026-08-29T00:00:01Z",
+      "archived": false
+    }
+  ],
+  "moment_posts": [
+    {
+      "id": "77777777-7777-4777-8777-777777777777",
+      "author_kind": "user",
+      "author_kind_raw": "user",
+      "body": "朋友圈测试动态",
+      "created_at": "2026-08-29T00:00:06Z",
+      "updated_at": "2026-08-29T00:00:06Z",
+      "published_at": "2026-08-29T00:00:06Z",
+      "revision": 1,
+      "device_id": "fixture-device"
+    }
+  ],
+  "moment_interactions": [
+    {
+      "id": "88888888-8888-4888-8888-888888888888",
+      "post_id": "77777777-7777-4777-8777-777777777777",
+      "parent_interaction_id": null,
+      "root_interaction_id": null,
+      "kind": "comment",
+      "kind_raw": "comment",
+      "actor_kind": "user",
+      "actor_kind_raw": "user",
+      "actor_role_id": null,
+      "body": "已删除的互动，不应变成聊天消息",
+      "created_at": "2026-08-29T00:00:07Z",
+      "updated_at": "2026-08-29T00:00:09Z",
+      "deleted_at": "2026-08-29T00:00:10Z",
+      "revision": 2,
+      "device_id": "fixture-device"
+    },
+    {
+      "id": "99999999-9999-4999-8999-999999999999",
+      "post_id": "77777777-7777-4777-8777-777777777777",
+      "parent_interaction_id": null,
+      "root_interaction_id": null,
+      "kind": "like",
+      "kind_raw": "like",
+      "actor_kind": "companion",
+      "actor_kind_raw": "companion",
+      "actor_role_id": "11111111-1111-4111-8111-111111111111",
+      "body": "",
+      "created_at": "2026-08-29T00:00:08Z",
+      "updated_at": "2026-08-29T00:00:08Z",
+      "revision": 1,
+      "device_id": "fixture-device"
+    }
+  ],
+  "settings": {
+    "provider": {
+      "provider_id": null,
+      "base_url": "",
+      "model": "",
+      "embedding_model": "",
+      "temperature": 0.8,
+      "streams_responses": true
+    },
+    "memory": {
+      "auto_extract_memory": true,
+      "token_budget": 2400,
+      "recent_message_limit": 24,
+      "raw_history_recall_enabled": true,
+      "raw_history_token_budget": 1000
+    },
+    "persistence": {
+      "cloud_sync_enabled": false
+    }
+  },
+  "evidence": [],
+  "summaries": []
+}

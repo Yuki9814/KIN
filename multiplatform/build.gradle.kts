@@ -12,8 +12,8 @@ plugins {
 
 val kinVersion = providers.gradleProperty("kinVersion")
     .map(String::trim)
-    .map { it.ifBlank { "0.1.4" } }
-    .orElse("0.1.4")
+    .map { it.ifBlank { "0.1.5" } }
+    .orElse("0.1.5")
     .get()
 
 allprojects {

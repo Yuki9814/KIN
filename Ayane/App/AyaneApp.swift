@@ -1,9 +1,143 @@
 import SwiftData
 import SwiftUI
 
+#if os(iOS)
+import UIKit
+import UserNotifications
+
+extension Notification.Name {
+    static let kinProactiveNotificationRouteRequested = Notification.Name(
+        "kin.proactive-notification.route-requested"
+    )
+}
+
+@MainActor
+final class KINNotificationRouter {
+    static let shared = KINNotificationRouter()
+
+    private(set) var pendingRoute: ProactiveNotificationRoute?
+
+    var hasPendingRoute: Bool { pendingRoute != nil }
+
+    func receive(userInfo: [AnyHashable: Any]) {
+        guard let route = ProactiveNotificationRoute(userInfo: userInfo) else { return }
+        pendingRoute = route
+        NotificationCenter.default.post(
+            name: .kinProactiveNotificationRouteRequested,
+            object: nil
+        )
+    }
+
+    func consume() -> ProactiveNotificationRoute? {
+        defer { pendingRoute = nil }
+        return pendingRoute
+    }
+}
+
+final class KINNotificationAppDelegate: NSObject, UIApplicationDelegate,
+    UNUserNotificationCenterDelegate {
+    func application(
+        _ application: UIApplication,
+        didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil
+    ) -> Bool {
+        UNUserNotificationCenter.current().delegate = self
+        return true
+    }
+
+    func userNotificationCenter(
+        _ center: UNUserNotificationCenter,
+        willPresent notification: UNNotification
+    ) async -> UNNotificationPresentationOptions {
+        [.banner, .list, .sound]
+    }
+
+    func userNotificationCenter(
+        _ center: UNUserNotificationCenter,
+        didReceive response: UNNotificationResponse
+    ) async {
+        await MainActor.run {
+            KINNotificationRouter.shared.receive(
+                userInfo: response.notification.request.content.userInfo
+            )
+        }
+    }
+}
+
+#if DEBUG
+@MainActor
+private enum LocalNotificationQAFixture {
+    static let delayArgument = "-KINNotificationQADelaySeconds"
+    private static let lastIdentifierKey = "debug.notificationQA.lastIdentifier"
+
+    static func runIfRequested(on appModel: AppModel) async {
+        let arguments = ProcessInfo.processInfo.arguments
+        guard let flagIndex = arguments.firstIndex(of: delayArgument),
+              arguments.indices.contains(flagIndex + 1),
+              let requestedDelay = TimeInterval(arguments[flagIndex + 1]) else {
+            await reportPreviousDeliveryIfNeeded()
+            return
+        }
+
+        let delay = max(5, requestedDelay)
+        let route = ProactiveNotificationRoute(
+            taskID: UUID(),
+            roleID: appModel.currentRoleID,
+            conversationID: appModel.currentConversation.id,
+            stage: .test
+        )
+        let didSchedule = await ProactiveNotificationService.shared.schedule(
+            route: route,
+            title: appModel.persona.name,
+            body: "测试通知：即使 KIN 被划掉，我也还能来找你。",
+            at: Date().addingTimeInterval(delay)
+        )
+        if didSchedule {
+            UserDefaults.standard.set(route.requestIdentifier, forKey: lastIdentifierKey)
+        }
+        print(
+            "[KIN][NotificationQA] scheduled=\(didSchedule) "
+                + "identifier=\(route.requestIdentifier) delay=\(Int(delay))"
+        )
+    }
+
+    static func reportPreviousDeliveryIfNeeded() async {
+        guard let identifier = UserDefaults.standard.string(forKey: lastIdentifierKey) else {
+            return
+        }
+        let center = UNUserNotificationCenter.current()
+        let settings = await center.notificationSettings()
+        let pending = await withCheckedContinuation { continuation in
+            center.getPendingNotificationRequests { requests in
+                continuation.resume(
+                    returning: Set(requests.map { $0.identifier })
+                )
+            }
+        }
+        let delivered = await ProactiveNotificationService.shared
+            .deliveredNotificationIdentifiers()
+        print(
+            "[KIN][NotificationQA] delivered=\(delivered.contains(identifier)) "
+                + "pending=\(pending.contains(identifier)) "
+                + "authorization=\(settings.authorizationStatus.rawValue) "
+                + "alert=\(settings.alertSetting.rawValue) "
+                + "notificationCenter=\(settings.notificationCenterSetting.rawValue) "
+                + "lockScreen=\(settings.lockScreenSetting.rawValue) "
+                + "scheduledDelivery=\(settings.scheduledDeliverySetting.rawValue) "
+                + "identifier=\(identifier)"
+        )
+    }
+}
+#endif
+#endif
+
 @main
 @MainActor
 struct AyaneApp: App {
+    #if os(iOS)
+    @UIApplicationDelegateAdaptor(KINNotificationAppDelegate.self)
+    private var notificationAppDelegate
+    #endif
+
     @State private var appModel: AppModel
     private let container: ModelContainer
     /// Retained for the lifetime of the app so a local destination continues
@@ -176,6 +310,9 @@ struct AyaneApp: App {
                     .environment(appModel)
                     .modelContainer(container)
                     .tint(AppTheme.accent)
+                    .task {
+                        await LocalNotificationQAFixture.runIfRequested(on: appModel)
+                    }
             }
             #else
             RootView()

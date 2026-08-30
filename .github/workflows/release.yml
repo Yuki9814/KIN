@@ -38,7 +38,7 @@ jobs:
             echo "::error::Release tag must use the exact vMAJOR.MINOR.PATCH form."
             exit 1
           fi
-          if [[ "$RELEASE_TAG" != "v0.1.4" ]]; then
+          if [[ "$RELEASE_TAG" != "v0.1.5" ]]; then
             echo "::error::Release tag must match the application version declared by this source tree."
             exit 1
           fi
@@ -148,7 +148,7 @@ jobs:
             KIN_IOS_ENTITLEMENTS=Configuration/Ayane-iOS.entitlements.example
             KIN_SOURCE_REVISION="$GITHUB_SHA"
             MARKETING_VERSION="$public_version"
-            CURRENT_PROJECT_VERSION=30
+            CURRENT_PROJECT_VERSION=31
           )
 
           mac_derived="$KIN_APPLE_ROOT/macos-derived"
@@ -164,7 +164,7 @@ jobs:
           [ -f "$mac_app/Contents/Info.plist" ] || { echo "::error::macOS Info.plist is missing"; exit 1; }
           plutil -replace CFBundleIdentifier -string com.example.kin.macos "$mac_app/Contents/Info.plist"
           test "$(plutil -extract CFBundleShortVersionString raw -o - "$mac_app/Contents/Info.plist")" = "$public_version"
-          test "$(plutil -extract CFBundleVersion raw -o - "$mac_app/Contents/Info.plist")" = "30"
+          test "$(plutil -extract CFBundleVersion raw -o - "$mac_app/Contents/Info.plist")" = "31"
           test "$(plutil -extract KINSourceRevision raw -o - "$mac_app/Contents/Info.plist")" = "$GITHUB_SHA"
           scripts/kin-release-asset-gate.sh --app-only "$mac_app" --expected-bundle-id com.example.kin.macos
           dmg_root="$KIN_APPLE_ROOT/dmg-root"
@@ -186,7 +186,7 @@ jobs:
           [ -f "$ios_app/Info.plist" ] || { echo "::error::iOS Info.plist is missing"; exit 1; }
           plutil -replace CFBundleIdentifier -string com.example.kin.ios "$ios_app/Info.plist"
           test "$(plutil -extract CFBundleShortVersionString raw -o - "$ios_app/Info.plist")" = "$public_version"
-          test "$(plutil -extract CFBundleVersion raw -o - "$ios_app/Info.plist")" = "30"
+          test "$(plutil -extract CFBundleVersion raw -o - "$ios_app/Info.plist")" = "31"
           test "$(plutil -extract KINSourceRevision raw -o - "$ios_app/Info.plist")" = "$GITHUB_SHA"
           ipa_root="$KIN_APPLE_ROOT/ipa-root"
           mkdir -p "$ipa_root/Payload"
@@ -206,7 +206,7 @@ jobs:
           [ -f "$sim_app/Info.plist" ] || { echo "::error::Simulator Info.plist is missing"; exit 1; }
           plutil -replace CFBundleIdentifier -string com.example.kin.ios "$sim_app/Info.plist"
           test "$(plutil -extract CFBundleShortVersionString raw -o - "$sim_app/Info.plist")" = "$public_version"
-          test "$(plutil -extract CFBundleVersion raw -o - "$sim_app/Info.plist")" = "30"
+          test "$(plutil -extract CFBundleVersion raw -o - "$sim_app/Info.plist")" = "31"
           test "$(plutil -extract KINSourceRevision raw -o - "$sim_app/Info.plist")" = "$GITHUB_SHA"
           sim_root="$KIN_APPLE_ROOT/sim-root"
           mkdir -p "$sim_root"
@@ -255,7 +255,7 @@ jobs:
           mapfile -t apks < <(find multiplatform/androidApp/build/outputs/apk/release -maxdepth 1 -type f -name "*.apk" -print)
           [ "${#apks[@]}" -eq 1 ] || { echo "::error::exactly one unsigned Android release APK is required"; exit 1; }
           aapt="$ANDROID_HOME/build-tools/36.0.0/aapt"
-          "$aapt" dump badging "${apks[0]}" | grep -F "package: name='app.kin.android' versionCode='4' versionName='$public_version'" >/dev/null
+          "$aapt" dump badging "${apks[0]}" | grep -F "package: name='app.kin.android' versionCode='5' versionName='$public_version'" >/dev/null
           release="$RUNNER_TEMP/kin-android-unsigned"
           mkdir -p "$release"
           cp "${apks[0]}" "$release/KIN-android-unsigned.apk"
@@ -317,7 +317,7 @@ jobs:
             --key-pass "pass:$ANDROID_RELEASE_KEY_PASSWORD" \
             --out "$signed_dir/KIN-android.apk" "$aligned" >/dev/null
           "$ANDROID_HOME/build-tools/36.0.0/aapt" dump badging "$signed_dir/KIN-android.apk" | \
-            grep -F "package: name='app.kin.android' versionCode='4' versionName='$public_version'" >/dev/null
+            grep -F "package: name='app.kin.android' versionCode='5' versionName='$public_version'" >/dev/null
           "$apksigner" verify --verbose --print-certs "$signed_dir/KIN-android.apk" >/dev/null
 
       - name: Upload signed Android artifact
@@ -547,7 +547,7 @@ jobs:
             "$release/KIN-windows.exe"
             "$release/SHA256SUMS"
             --title "KIN $RELEASE_TAG"
-            --notes "应用版本：$public_version（Apple Build 30，Android versionCode 4；Windows 安装器字段 1.1.4）。macOS DMG 未公证；iOS 真机 IPA 无签名，不能直接安装，需使用自己的 Apple Team、Bundle ID、证书和 provisioning profile 重签；iOS Simulator ZIP 仅供模拟器。Windows 包未使用个人证书；Android APK 在受保护的 release-signing 环境中签名。请先核验 SHA256SUMS。"
+            --notes "应用版本：$public_version（Apple Build 31，Android versionCode 5；Windows 安装器字段 1.1.5）。macOS DMG 未公证；iOS 真机 IPA 无签名，不能直接安装，需使用自己的 Apple Team、Bundle ID、证书和 provisioning profile 重签；iOS Simulator ZIP 仅供模拟器。Windows 包未使用个人证书；Android APK 在受保护的 release-signing 环境中签名。请先核验 SHA256SUMS。"
           )
           release_args+=(--verify-tag)
           gh release create --repo "$GITHUB_REPOSITORY" "$RELEASE_TAG" "${release_args[@]}"

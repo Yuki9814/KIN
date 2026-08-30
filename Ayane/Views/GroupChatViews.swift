@@ -626,6 +626,14 @@ struct GroupChatPreviewView: View {
                 companionAvatarAction: message.senderRoleID.map { roleID in
                     { selectedProfileRoute = GroupProfileRoute(roleID: RoleScope.resolve(roleID)) }
                 },
+                companionAvatarPokeAction: message.senderRoleID.map { roleID in
+                    {
+                        appModel.pokeGroupCompanion(
+                            roleID: RoleScope.resolve(roleID),
+                            conversationID: displayedGroup.conversationID
+                        )
+                    }
+                },
                 userName: appModel.userProfile.displayName,
                 userAvatarImageData: appModel.userProfile.avatarImageData
             )

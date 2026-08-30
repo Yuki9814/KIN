@@ -189,6 +189,11 @@ enum AppTheme {
     static let userBubble = outgoingBubble
     static let assistantBubble = incomingBubble
 
+    /// Semantic red used for an active Moments like. Keeping this separate
+    /// from the WeChat green action accent makes the selected state clear
+    /// without hard-coding a color in the feed views.
+    static let momentsLikeAccent = Color(red: 214 / 255, green: 55 / 255, blue: 55 / 255)
+
     #if os(iOS)
     static let subtleBorder = adaptiveColor(
         light: UIColor.black.withAlphaComponent(0.08),

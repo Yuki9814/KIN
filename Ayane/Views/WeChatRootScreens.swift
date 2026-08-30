@@ -152,6 +152,16 @@ struct WeChatConversationListView: View {
         } message: {
             Text(removalMessage)
         }
+        .onReceive(
+            NotificationCenter.default.publisher(
+                for: .kinProactiveNotificationRouteRequested
+            )
+        ) { _ in
+            openPendingNotificationRoute()
+        }
+        .task {
+            openPendingNotificationRoute()
+        }
         .accessibilityIdentifier("wechat.screen.chats")
     }
 
@@ -420,13 +430,19 @@ struct WeChatConversationListView: View {
         }
     }
 
-    private func openCompanion(_ id: UUID) {
+    private func openCompanion(_ id: UUID, conversationID: UUID? = nil) {
         do {
-            try appModel.selectCompanion(id: id)
+            try appModel.selectCompanion(id: id, conversationID: conversationID)
             showsChat = true
         } catch {
             appModel.errorMessage = error.localizedDescription
         }
+    }
+
+    private func openPendingNotificationRoute() {
+        guard let route = KINNotificationRouter.shared.consume() else { return }
+        appModel.processDueProactiveTasks(now: Date())
+        openCompanion(route.roleID, conversationID: route.conversationID)
     }
 }
 

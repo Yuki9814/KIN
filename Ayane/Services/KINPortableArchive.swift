@@ -49,6 +49,17 @@ struct KINPortableArchiveV1: Equatable, Sendable {
     private static let magic = Data(formatIdentifier.utf8)
     private static let headerLength = magic.count + 1 + saltLength + nonceLength
 
+    /// Maps the cross-platform affinity score to the same four tiers used by
+    /// the native policy: 0..<20, 20..<50, 50..<80 and 80...100.
+    static func affinityTier(for score: Int) -> Int {
+        switch score {
+        case ..<20: return 0
+        case ..<50: return 1
+        case ..<80: return 2
+        default: return 3
+        }
+    }
+
     /// Encrypts arbitrary bytes using PBKDF2-HMAC-SHA256 and AES-256-GCM.
     /// This primitive is intentionally independent from SwiftData so callers
     /// can test the cryptographic contract without touching the local store.
@@ -852,7 +863,7 @@ private enum KMPPortableArchiveCompatibility {
             "forgiveness_score": 0.0,
             "forgiveness_threshold": 2.0,
             "affinity_score": Double(affinity),
-            "affinity_tier": min(3, affinity / 25),
+            "affinity_tier": KINPortableArchiveV1.affinityTier(for: affinity),
             "affinity_policy_version": 1,
             "dignity": 0.5,
             "independence": 0.5,

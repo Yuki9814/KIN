@@ -184,6 +184,7 @@ Ayane/Services/DataExportService.swift
 Ayane/Services/DataImportService.swift
 Ayane/Services/DataMergeService.swift
 Ayane/Services/GroupResponseCoordinator.swift
+Ayane/Services/ImageGenerationClient.swift
 Ayane/Services/KINPortableArchive.swift
 Ayane/Services/KeychainStore.swift
 Ayane/Services/LocalSubscriptionCredentialImporter.swift
@@ -228,6 +229,7 @@ AyaneTests/AIConnectionStoreTests.swift
 AyaneTests/AppModelBirthdayAutomationTests.swift
 AyaneTests/AppModelConversationCareTests.swift
 AyaneTests/AppModelConversationDataActionsTests.swift
+AyaneTests/AppModelImageGenerationTests.swift
 AyaneTests/AppModelMemoryMaintenanceTests.swift
 AyaneTests/AppModelMemorySearchScaleTests.swift
 AyaneTests/AppModelMomentInteractionRoutingTests.swift
@@ -252,6 +254,7 @@ AyaneTests/DataMergeServiceTests.swift
 AyaneTests/DomainServicesTests.swift
 AyaneTests/GroupBackupValidationTests.swift
 AyaneTests/GroupResponseCoordinatorTokenBoundaryTests.swift
+AyaneTests/ImageGenerationClientTests.swift
 AyaneTests/KINPortableArchiveTests.swift
 AyaneTests/LocalConversationSearchIndexTests.swift
 AyaneTests/LocalMemorySearchIndexTests.swift
@@ -272,6 +275,7 @@ AyaneTests/MessageBubbleSegmenterTests.swift
 AyaneTests/MessagePresentationTests.swift
 AyaneTests/MomentAIInteractionTaskMergeTests.swift
 AyaneTests/MomentAIInteractionTaskPersistenceTests.swift
+AyaneTests/MomentInteractionTombstoneTests.swift
 AyaneTests/MomentSchedulerTests.swift
 AyaneTests/MomentTaskRecurrenceTests.swift
 AyaneTests/OpenAICompatibleClientTests.swift
@@ -330,10 +334,12 @@ multiplatform/sharedLogic/src/commonMain/kotlin/app/kin/shared/platform/Platform
 multiplatform/sharedLogic/src/commonMain/kotlin/app/kin/shared/relationship/RelationshipStateMachine.kt
 multiplatform/sharedLogic/src/commonMain/kotlin/app/kin/shared/settings/SettingsService.kt
 multiplatform/sharedLogic/src/commonMain/kotlin/app/kin/shared/storage/KinRepository.kt
+multiplatform/sharedLogic/src/commonTest/kotlin/app/kin/shared/backup/AppleArchiveCompatibilityTest.kt
 multiplatform/sharedLogic/src/commonTest/kotlin/app/kin/shared/backup/ArchiveCryptoGoldenVectorTest.kt
 multiplatform/sharedLogic/src/commonTest/kotlin/app/kin/shared/memory/PromptAssemblerTest.kt
 multiplatform/sharedLogic/src/commonTest/kotlin/app/kin/shared/relationship/RelationshipStateMachineTest.kt
 multiplatform/sharedLogic/src/commonTest/resources/fixtures/apple_ayane_data_export_v16.json
+multiplatform/sharedLogic/src/commonTest/resources/fixtures/apple_ayane_data_export_v17.json
 multiplatform/sharedLogic/src/commonTest/resources/fixtures/kin_portable_payload_v1.json
 multiplatform/sharedLogic/src/desktopMain/kotlin/app/kin/shared/platform/DesktopPlatform.kt
 multiplatform/sharedLogic/src/desktopTest/kotlin/app/kin/shared/ai/OpenAICompatibleSseClientDesktopTest.kt

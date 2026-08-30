@@ -171,6 +171,88 @@ final class ProactiveMessagePolicyTests: XCTestCase {
         )
     }
 
+    func testNotificationRouteRoundTripsUserInfoAndUsesDistinctStageIdentifiers() throws {
+        let taskID = UUID()
+        let roleID = UUID()
+        let conversationID = UUID()
+        let stages: [ProactiveNotificationStage] = [.initial, .followUp, .test]
+        let routes = stages.map {
+            ProactiveNotificationRoute(
+                taskID: taskID,
+                roleID: roleID,
+                conversationID: conversationID,
+                stage: $0
+            )
+        }
+
+        for route in routes {
+            let decoded = try XCTUnwrap(
+                ProactiveNotificationRoute(userInfo: route.userInfo)
+            )
+            XCTAssertEqual(decoded, route)
+        }
+
+        XCTAssertEqual(Set(routes.map(\.requestIdentifier)).count, stages.count)
+        XCTAssertEqual(
+            routes[0].requestIdentifier,
+            ProactiveNotificationRoute(
+                taskID: taskID,
+                roleID: roleID,
+                conversationID: conversationID,
+                stage: .initial
+            ).requestIdentifier
+        )
+    }
+
+    func testNotificationCancellationIdentifiersIncludeLegacyAndAllStages() {
+        let taskID = UUID()
+        let identifiers = Set(
+            ProactiveNotificationRoute.cancellationIdentifiers(for: [taskID])
+        )
+        let legacyIdentifier = taskID.uuidString.lowercased()
+        XCTAssertTrue(identifiers.contains(legacyIdentifier))
+
+        let expectedStageIdentifiers = Set(
+            [ProactiveNotificationStage.initial, .followUp, .test].map {
+                ProactiveNotificationRoute(
+                    taskID: taskID,
+                    roleID: UUID(),
+                    conversationID: UUID(),
+                    stage: $0
+                ).requestIdentifier
+            }
+        )
+        XCTAssertTrue(identifiers.isSuperset(of: expectedStageIdentifiers))
+    }
+
+    func testNotificationRouteSelectsItsExactConversation() throws {
+        let suiteName = "ProactiveMessagePolicyTests.RouteSelection.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let bootstrap = PersistenceController.makeContainer(inMemory: true, preferCloud: false)
+        let appModel = AppModel(
+            bootstrap: bootstrap,
+            dataDefaults: defaults,
+            apiKeyLoader: { nil }
+        )
+        let routedConversation = ConversationRecord(
+            title: "通知指定会话",
+            createdAt: Date().addingTimeInterval(-60),
+            roleID: appModel.currentRoleID
+        )
+        let context = ModelContext(bootstrap.container)
+        context.insert(routedConversation)
+        try context.save()
+        appModel.refreshFromStore(force: true)
+
+        try appModel.selectCompanion(
+            id: appModel.currentRoleID,
+            conversationID: routedConversation.id
+        )
+
+        XCTAssertEqual(appModel.currentConversation.id, routedConversation.id)
+    }
+
     func testDueTaskSendsOneInitialAndOneFollowUpThenCompletes() throws {
         let suiteName = "ProactiveMessagePolicyTests.\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
@@ -241,6 +323,302 @@ final class ProactiveMessagePolicyTests: XCTestCase {
         let thirdMessages = try context.fetch(FetchDescriptor<ConversationEvent>())
             .filter { $0.conversationID == appModel.currentConversation.id }
         XCTAssertEqual(thirdMessages.count, 2)
+    }
+
+    func testDueTasksWithSeparateInitialAndFollowUpRecordsPersistEachStage() throws {
+        let suiteName = "ProactiveMessagePolicyTests.SeparateStages.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        defaults.set(true, forKey: SettingsKeys.proactiveMessagesEnabled)
+        defaults.set(true, forKey: SettingsKeys.proactiveFollowUpEnabled)
+        defaults.set(false, forKey: SettingsKeys.autoExtractMemory)
+        defaults.set(0, forKey: SettingsKeys.proactiveQuietStartHour)
+        defaults.set(0, forKey: SettingsKeys.proactiveQuietEndHour)
+
+        let bootstrap = PersistenceController.makeContainer(inMemory: true, preferCloud: false)
+        let appModel = AppModel(
+            bootstrap: bootstrap,
+            dataDefaults: defaults,
+            apiKeyLoader: { nil }
+        )
+        let context = ModelContext(bootstrap.container)
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let initialKey = "proactive:\(appModel.currentRoleID.uuidString.lowercased()):\(UUID().uuidString.lowercased())"
+        let generatedText = #"{"initial":"首条主动消息。","followUp":"第二条主动消息。"}"#
+        let initial = ProactiveMessageTaskRecord(
+            roleID: appModel.currentRoleID,
+            conversationID: appModel.currentConversation.id,
+            scheduledAt: now.addingTimeInterval(-1),
+            followUpCount: 0,
+            state: .scheduled,
+            idempotencyKey: initialKey,
+            generatedText: generatedText,
+            lastUserEventID: nil,
+            scheduledFromUserAt: now.addingTimeInterval(-86_400),
+            createdAt: now.addingTimeInterval(-86_400),
+            updatedAt: now.addingTimeInterval(-86_400),
+            revision: 1,
+            deviceID: "policy-test"
+        )
+        let followUp = ProactiveMessageTaskRecord(
+            roleID: appModel.currentRoleID,
+            conversationID: appModel.currentConversation.id,
+            scheduledAt: now.addingTimeInterval(86_400),
+            followUpCount: 1,
+            state: .scheduled,
+            idempotencyKey: "\(initialKey):follow-up",
+            generatedText: generatedText,
+            lastUserEventID: nil,
+            scheduledFromUserAt: now.addingTimeInterval(-86_400),
+            createdAt: now.addingTimeInterval(-86_400),
+            updatedAt: now.addingTimeInterval(-86_400),
+            revision: 1,
+            deviceID: "policy-test"
+        )
+        context.insert(initial)
+        context.insert(followUp)
+        try context.save()
+        appModel.refreshFromStore(force: true)
+
+        appModel.processDueProactiveTasks(now: now)
+
+        let firstPassTasks = try context.fetch(FetchDescriptor<ProactiveMessageTaskRecord>())
+        let firstPassInitial = try XCTUnwrap(
+            firstPassTasks.first { $0.idempotencyKey == initialKey }
+        )
+        let firstPassFollowUp = try XCTUnwrap(
+            firstPassTasks.first { $0.idempotencyKey == "\(initialKey):follow-up" }
+        )
+        XCTAssertEqual(firstPassInitial.state, .completed)
+        XCTAssertEqual(firstPassInitial.followUpCount, 0)
+        XCTAssertEqual(firstPassFollowUp.state, .scheduled)
+        XCTAssertEqual(firstPassFollowUp.followUpCount, 1)
+        XCTAssertEqual(firstPassTasks.count, 2)
+
+        let firstMessages = try context.fetch(FetchDescriptor<ConversationEvent>())
+            .filter { $0.conversationID == appModel.currentConversation.id }
+            .sorted { $0.occurredAt < $1.occurredAt }
+        XCTAssertEqual(firstMessages.map(\.content), ["首条主动消息。"])
+
+        appModel.processDueProactiveTasks(
+            now: followUp.scheduledAt.addingTimeInterval(1)
+        )
+
+        let secondPassTasks = try context.fetch(FetchDescriptor<ProactiveMessageTaskRecord>())
+        let secondPassFollowUp = try XCTUnwrap(
+            secondPassTasks.first { $0.idempotencyKey == "\(initialKey):follow-up" }
+        )
+        XCTAssertEqual(secondPassFollowUp.state, .completed)
+        XCTAssertEqual(secondPassFollowUp.followUpCount, 1)
+        XCTAssertEqual(secondPassTasks.count, 2)
+
+        let secondMessages = try context.fetch(FetchDescriptor<ConversationEvent>())
+            .filter { $0.conversationID == appModel.currentConversation.id }
+            .sorted { $0.occurredAt < $1.occurredAt }
+        XCTAssertEqual(
+            secondMessages.map(\.content),
+            ["首条主动消息。", "第二条主动消息。"]
+        )
+    }
+
+    func testGeneratedTwoStageFollowUpToggleCancelsRestoresAndDeliversEachOnce() async throws {
+        let suiteName = "ProactiveMessagePolicyTests.ToggleRecovery.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        defaults.set("https://unit.test/v1", forKey: SettingsKeys.baseURL)
+        defaults.set("fixture-model", forKey: SettingsKeys.model)
+        defaults.set(false, forKey: SettingsKeys.streamResponses)
+        defaults.set(false, forKey: SettingsKeys.autoExtractMemory)
+        defaults.set(false, forKey: SettingsKeys.humanizedReplyDelayEnabled)
+        defaults.set(true, forKey: SettingsKeys.proactiveMessagesEnabled)
+        defaults.set(true, forKey: SettingsKeys.proactiveFollowUpEnabled)
+        defaults.set(false, forKey: SettingsKeys.conversationCareEnabled)
+        defaults.set(0, forKey: SettingsKeys.proactiveQuietStartHour)
+        defaults.set(0, forKey: SettingsKeys.proactiveQuietEndHour)
+
+        let bootstrap = PersistenceController.makeContainer(inMemory: true, preferCloud: false)
+        let appModel = AppModel(
+            bootstrap: bootstrap,
+            client: GeneratedTwoStageFixtureClient(),
+            memoryIndex: LocalMemorySearchIndex(inMemory: true),
+            conversationIndex: LocalConversationSearchIndex(inMemory: true),
+            dataDefaults: defaults,
+            apiKeyLoader: { "fixture-key" },
+            performLegacyConversationMigration: false,
+            seedBuiltInCompanions: false
+        )
+
+        appModel.send("触发双阶段主动消息")
+        try await waitUntil {
+            let context = ModelContext(bootstrap.container)
+            let tasks = (try? context.fetch(FetchDescriptor<ProactiveMessageTaskRecord>())) ?? []
+            return tasks.contains(where: { $0.followUpCount == 0 })
+                && tasks.contains(where: { $0.followUpCount == 1 })
+        }
+
+        let context = ModelContext(bootstrap.container)
+        let generatedTasks = try context.fetch(FetchDescriptor<ProactiveMessageTaskRecord>())
+        let initial = try XCTUnwrap(generatedTasks.first { $0.followUpCount == 0 })
+        let followUp = try XCTUnwrap(generatedTasks.first { $0.followUpCount == 1 })
+        XCTAssertEqual(followUp.idempotencyKey, initial.idempotencyKey + ":follow-up")
+        XCTAssertEqual(initial.state, .scheduled)
+        XCTAssertEqual(followUp.state, .scheduled)
+
+        defaults.set(false, forKey: SettingsKeys.proactiveFollowUpEnabled)
+        appModel.proactiveFollowUpSettingDidChange(enabled: false)
+
+        let cancelledTasks = try context.fetch(FetchDescriptor<ProactiveMessageTaskRecord>())
+        let cancelledFollowUp = try XCTUnwrap(
+            cancelledTasks.first { $0.id == followUp.id }
+        )
+        XCTAssertEqual(cancelledFollowUp.state, .cancelled)
+        XCTAssertEqual(
+            try context.fetch(FetchDescriptor<ConversationEvent>())
+                .filter { $0.content == "生成初始主动消息。" || $0.content == "生成跟进主动消息。" }
+                .count,
+            0
+        )
+
+        defaults.set(true, forKey: SettingsKeys.proactiveFollowUpEnabled)
+        appModel.proactiveFollowUpSettingDidChange(enabled: true)
+
+        let restoredTasks = try context.fetch(FetchDescriptor<ProactiveMessageTaskRecord>())
+        let restoredFollowUp = try XCTUnwrap(
+            restoredTasks.first { $0.id == followUp.id }
+        )
+        XCTAssertEqual(restoredFollowUp.state, .scheduled)
+        XCTAssertEqual(restoredFollowUp.followUpCount, 1)
+
+        let deliveryNow = Date()
+        let currentInitial = try XCTUnwrap(
+            restoredTasks.first { $0.id == initial.id }
+        )
+        currentInitial.scheduledAt = deliveryNow.addingTimeInterval(-2)
+        restoredFollowUp.scheduledAt = deliveryNow.addingTimeInterval(-1)
+        try context.save()
+        appModel.processDueProactiveTasks(now: deliveryNow)
+
+        let proactiveContents = try context.fetch(FetchDescriptor<ConversationEvent>())
+            .filter {
+                $0.content == "生成初始主动消息。"
+                    || $0.content == "生成跟进主动消息。"
+            }
+            .sorted { $0.occurredAt < $1.occurredAt }
+            .map(\.content)
+        XCTAssertEqual(
+            proactiveContents,
+            ["生成初始主动消息。", "生成跟进主动消息。"]
+        )
+
+        let completedTasks = try context.fetch(FetchDescriptor<ProactiveMessageTaskRecord>())
+        XCTAssertEqual(
+            try XCTUnwrap(completedTasks.first { $0.id == initial.id }).state,
+            .completed
+        )
+        XCTAssertEqual(
+            try XCTUnwrap(completedTasks.first { $0.id == followUp.id }).state,
+            .completed
+        )
+
+        appModel.processDueProactiveTasks(now: deliveryNow.addingTimeInterval(86_400))
+        let afterRetryContents = try context.fetch(FetchDescriptor<ConversationEvent>())
+            .filter {
+                $0.content == "生成初始主动消息。"
+                    || $0.content == "生成跟进主动消息。"
+            }
+        XCTAssertEqual(afterRetryContents.count, 2)
+    }
+
+    func testCancelledFollowUpSiblingDoesNotPermanentlySwallowFollowUp() throws {
+        let suiteName = "ProactiveMessagePolicyTests.CancelledSibling.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        defaults.set(true, forKey: SettingsKeys.proactiveMessagesEnabled)
+        defaults.set(true, forKey: SettingsKeys.proactiveFollowUpEnabled)
+        defaults.set(false, forKey: SettingsKeys.autoExtractMemory)
+        defaults.set(false, forKey: SettingsKeys.conversationCareEnabled)
+        defaults.set(0, forKey: SettingsKeys.proactiveQuietStartHour)
+        defaults.set(0, forKey: SettingsKeys.proactiveQuietEndHour)
+
+        let bootstrap = PersistenceController.makeContainer(inMemory: true, preferCloud: false)
+        let appModel = AppModel(
+            bootstrap: bootstrap,
+            dataDefaults: defaults,
+            apiKeyLoader: { nil }
+        )
+        let context = ModelContext(bootstrap.container)
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let initialKey = "proactive:\(appModel.currentRoleID.uuidString.lowercased()):\(UUID().uuidString.lowercased())"
+        let generatedText = #"{"initial":"孤立初始主动消息。","followUp":"孤立跟进主动消息。"}"#
+        let initial = ProactiveMessageTaskRecord(
+            roleID: appModel.currentRoleID,
+            conversationID: appModel.currentConversation.id,
+            scheduledAt: now.addingTimeInterval(-1),
+            followUpCount: 0,
+            state: .scheduled,
+            idempotencyKey: initialKey,
+            generatedText: generatedText,
+            scheduledFromUserAt: now.addingTimeInterval(-86_400),
+            createdAt: now.addingTimeInterval(-86_400),
+            updatedAt: now.addingTimeInterval(-86_400),
+            revision: 1,
+            deviceID: "policy-test"
+        )
+        let cancelledSibling = ProactiveMessageTaskRecord(
+            roleID: appModel.currentRoleID,
+            conversationID: appModel.currentConversation.id,
+            scheduledAt: now.addingTimeInterval(86_400),
+            followUpCount: 1,
+            state: .cancelled,
+            idempotencyKey: initialKey + ":follow-up",
+            generatedText: generatedText,
+            scheduledFromUserAt: now.addingTimeInterval(-86_400),
+            createdAt: now.addingTimeInterval(-86_400),
+            updatedAt: now.addingTimeInterval(-86_400),
+            revision: 2,
+            deviceID: "policy-test"
+        )
+        context.insert(initial)
+        context.insert(cancelledSibling)
+        try context.save()
+        appModel.refreshFromStore(force: true)
+
+        appModel.processDueProactiveTasks(now: now)
+
+        let firstContents = try context.fetch(FetchDescriptor<ConversationEvent>())
+            .filter {
+                $0.content == "孤立初始主动消息。"
+                    || $0.content == "孤立跟进主动消息。"
+            }
+            .map(\.content)
+        XCTAssertEqual(firstContents, ["孤立初始主动消息。"])
+
+        let afterFirst = try context.fetch(FetchDescriptor<ProactiveMessageTaskRecord>())
+        XCTAssertEqual(
+            try XCTUnwrap(afterFirst.first { $0.id == cancelledSibling.id }).state,
+            .cancelled
+        )
+        let activeFollowUpDates = afterFirst
+            .filter { !$0.state.isTerminal && $0.followUpCount > 0 }
+            .map(\.scheduledAt)
+        let followUpDue = try XCTUnwrap(activeFollowUpDates.max())
+        appModel.processDueProactiveTasks(now: followUpDue.addingTimeInterval(1))
+
+        let secondContents = try context.fetch(FetchDescriptor<ConversationEvent>())
+            .filter {
+                $0.content == "孤立初始主动消息。"
+                    || $0.content == "孤立跟进主动消息。"
+            }
+            .map(\.content)
+        XCTAssertEqual(secondContents.count, 2)
+        XCTAssertEqual(
+            secondContents.filter { $0 == "孤立初始主动消息。" }.count,
+            1
+        )
+        XCTAssertEqual(
+            secondContents.filter { $0 == "孤立跟进主动消息。" }.count,
+            1
+        )
     }
 
     func testNewBehaviorDefaultsAndConfiguredFollowUpRange() throws {
@@ -347,6 +725,18 @@ final class ProactiveMessagePolicyTests: XCTestCase {
         XCTAssertEqual(messages.map(\.content), ["只来一次。"])
     }
 
+    private func waitUntil(
+        timeout: TimeInterval = 3,
+        condition: @escaping @MainActor () -> Bool
+    ) async throws {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if condition() { return }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        XCTFail("Timed out waiting for proactive task generation")
+    }
+
     private func date(
         year: Int,
         month: Int,
@@ -386,5 +776,43 @@ final class ProactiveMessagePolicyTests: XCTestCase {
         XCTAssertEqual(values.day, day)
         XCTAssertEqual(values.hour, hour)
         XCTAssertEqual(values.minute, minute)
+    }
+}
+
+private final class GeneratedTwoStageFixtureClient: AIClientProtocol, @unchecked Sendable {
+    func streamChat(
+        messages: [APIChatMessage],
+        configuration: ProviderConfiguration,
+        apiKey: String
+    ) -> AsyncThrowingStream<String, Error> {
+        AsyncThrowingStream { $0.finish() }
+    }
+
+    func complete(
+        messages: [APIChatMessage],
+        configuration: ProviderConfiguration,
+        apiKey: String,
+        temperature: Double?,
+        maxTokens: Int?
+    ) async throws -> String {
+        if messages.contains(where: { $0.content.contains("只输出 JSON") }) {
+            return #"{"initial":"生成初始主动消息。","follow_up":"生成跟进主动消息。"}"#
+        }
+        return "普通回复，不属于主动消息。"
+    }
+
+    func embedding(
+        for text: String,
+        configuration: ProviderConfiguration,
+        apiKey: String
+    ) async throws -> [Float] {
+        []
+    }
+
+    func testConnection(
+        configuration: ProviderConfiguration,
+        apiKey: String
+    ) async throws -> ConnectionTestResult {
+        ConnectionTestResult(latency: 0, reply: "OK")
     }
 }

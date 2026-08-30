@@ -9,6 +9,9 @@ enum SettingsKeys {
     static let embeddingModel = "provider.embeddingModel"
     static let temperature = "provider.temperature"
     static let streamResponses = "provider.streamResponses"
+    static let imageGenerationBaseURL = "imageGeneration.baseURL"
+    static let imageGenerationModel = "imageGeneration.model"
+    static let imageGenerationAPIStyle = "imageGeneration.apiStyle"
     static let typingIndicatorEnabled = "chat.typingIndicatorEnabled"
     static let humanizedReplyDelayEnabled = "chat.humanizedReplyDelayEnabled"
     static let timeInjectionEnabled = "chat.timeInjectionEnabled"
@@ -81,6 +84,9 @@ enum SettingsStore {
             SettingsKeys.embeddingModel: "",
             SettingsKeys.temperature: 0.8,
             SettingsKeys.streamResponses: true,
+            SettingsKeys.imageGenerationBaseURL: "https://api.openai.com/v1",
+            SettingsKeys.imageGenerationModel: "gpt-image-2",
+            SettingsKeys.imageGenerationAPIStyle: ImageGenerationAPIStyle.imagesAPI.rawValue,
             SettingsKeys.typingIndicatorEnabled: true,
             SettingsKeys.humanizedReplyDelayEnabled: true,
             SettingsKeys.timeInjectionEnabled: true,
@@ -174,10 +180,43 @@ enum SettingsStore {
         return try KeychainStore.loadAPIKey(providerID: provider.credentialID(for: baseURL))
     }
 
-    /// A dedicated credential reserved for the future direct image-generation
-    /// API. It is intentionally isolated from every chat provider credential.
+    /// Image generation is a separate provider surface. Its credential stays
+    /// isolated from chat credentials so changing either endpoint can never
+    /// send a token to the other provider by accident.
     static func imageGenerationAPIKey() throws -> String? {
         try KeychainStore.loadImageGenerationAPIKey()
+    }
+
+    static func imageGenerationConfiguration(
+        defaults: UserDefaults = .standard
+    ) -> ImageGenerationConfiguration {
+        ImageGenerationConfiguration(
+            baseURL: defaults.string(forKey: SettingsKeys.imageGenerationBaseURL)
+                ?? "https://api.openai.com/v1",
+            model: defaults.string(forKey: SettingsKeys.imageGenerationModel)
+                ?? "gpt-image-2",
+            apiStyle: ImageGenerationAPIStyle(
+                rawValue: defaults.string(forKey: SettingsKeys.imageGenerationAPIStyle) ?? ""
+            ) ?? .imagesAPI
+        )
+    }
+
+    static func saveImageGenerationConfiguration(
+        _ configuration: ImageGenerationConfiguration,
+        defaults: UserDefaults = .standard
+    ) {
+        defaults.set(
+            configuration.baseURL.trimmingCharacters(in: .whitespacesAndNewlines),
+            forKey: SettingsKeys.imageGenerationBaseURL
+        )
+        defaults.set(
+            configuration.model.trimmingCharacters(in: .whitespacesAndNewlines),
+            forKey: SettingsKeys.imageGenerationModel
+        )
+        defaults.set(
+            configuration.apiStyle.rawValue,
+            forKey: SettingsKeys.imageGenerationAPIStyle
+        )
     }
 
     static func saveImageGenerationAPIKey(_ value: String) throws {

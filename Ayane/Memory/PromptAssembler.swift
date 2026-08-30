@@ -103,6 +103,9 @@ struct PromptConversationContext: Equatable, Sendable {
     var groupFacts: [String]
     var affinityInstruction: String
     var timeInstruction: String
+    var messageTimeContext: ConversationTimeContext?
+    var messageSenderLabels: [UUID: String]
+    var eventCutoff: Date?
     var rollingSummary: String?
 
     init(
@@ -110,12 +113,18 @@ struct PromptConversationContext: Equatable, Sendable {
         groupFacts: [String] = [],
         affinityInstruction: String = AffinityPolicy.promptLine(for: 0),
         timeInstruction: String = "",
+        messageTimeContext: ConversationTimeContext? = nil,
+        messageSenderLabels: [UUID: String] = [:],
+        eventCutoff: Date? = nil,
         rollingSummary: String? = nil
     ) {
         self.sharedReality = sharedReality
         self.groupFacts = groupFacts
         self.affinityInstruction = affinityInstruction
         self.timeInstruction = timeInstruction
+        self.messageTimeContext = messageTimeContext
+        self.messageSenderLabels = messageSenderLabels
+        self.eventCutoff = eventCutoff
         self.rollingSummary = rollingSummary
     }
 }
@@ -228,7 +237,9 @@ enum PromptAssembler {
             historicalEvents,
             characterBudget: historicalCharacterBudget,
             tokenBudget: historicalTokenBudget,
-            maxCount: historicalMaxCount
+            maxCount: historicalMaxCount,
+            timeContext: context.messageTimeContext,
+            eventCutoff: context.eventCutoff
         )
 
         let sharedReality = context.sharedReality.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -248,6 +259,7 @@ enum PromptAssembler {
             : """
               <time_context>
               \(timeInstruction)
+              时间解释规则：以每条消息自己的发生时间为准。把“稍后、过一小时、明天、再回来”等相对说法和计划锚定到说出它的那条消息，而不是锚定到当前回复时间。若按当前时间预计期限已经过去，不得把旧计划当作用户刚刚提出；其结果应视为未知，只在与当前消息相关时自然询问。会话摘要、历史片段和长期记忆均是过去背景，除非当前用户消息明确确认，否则不代表旧计划仍待执行或旧状态仍在持续。“本地消息时间”和“消息发送者”是内部元数据，除非用户询问具体时间，否则不要复述标记或机械报时。
               </time_context>
 
               """
@@ -297,7 +309,10 @@ enum PromptAssembler {
             recentEvents,
             characterBudget: recentCharacterBudget,
             tokenBudget: recentTokenBudget,
-            maxCount: recentMaxCount
+            maxCount: recentMaxCount,
+            timeContext: context.messageTimeContext,
+            senderLabels: context.messageSenderLabels,
+            eventCutoff: context.eventCutoff
         ))
         return messages
     }
@@ -310,18 +325,23 @@ enum PromptAssembler {
         _ events: [ConversationEvent],
         characterBudget: Int,
         tokenBudget: Int,
-        maxCount: Int
+        maxCount: Int,
+        timeContext: ConversationTimeContext?,
+        senderLabels: [UUID: String],
+        eventCutoff: Date?
     ) -> [APIChatMessage] {
         let characterBudget = min(max(0, characterBudget), recentCharacterBudget)
         let tokenBudget = min(max(0, tokenBudget), recentTokenBudget)
         let maxCount = min(max(0, maxCount), recentMaxCount)
         guard characterBudget > 0, tokenBudget > 0, maxCount > 0 else { return [] }
 
-        let eligible = events.filter {
-            !$0.redacted
-                && ($0.role == .user || $0.role == .assistant)
-                && $0.deliveryState == .complete
-                && !$0.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        let eligible = events.filter { event in
+            let isWithinCutoff = eventCutoff.map { event.occurredAt <= $0 } ?? true
+            return isWithinCutoff
+                && !event.redacted
+                && (event.role == .user || event.role == .assistant)
+                && event.deliveryState == .complete
+                && !event.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         }
 
         var selected: [APIChatMessage] = []
@@ -332,14 +352,35 @@ enum PromptAssembler {
             let remainingTokens = tokenBudget - usedTokens
             guard remainingCharacters > 0, remainingTokens > 0 else { break }
 
-            let content = fittingRecentContent(
-                event.content,
-                characterLimit: remainingCharacters,
-                tokenLimit: remainingTokens
-            )
-            guard !content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            var metadataLines: [String] = []
+            if let timeContext {
+                metadataLines.append(timeContext.messageTimestampLine(for: event.occurredAt))
+            }
+            if let sender = senderLabels[event.id]
+                .map(Self.singleLineMetadataText)
+                .flatMap({ $0.isEmpty ? nil : $0 }) {
+                metadataLines.append("【消息发送者：\(sender)】")
+            }
+            let metadataPrefix = metadataLines.isEmpty
+                ? ""
+                : metadataLines.joined(separator: "\n") + "\n"
+            let metadataCharacters = metadataPrefix.count
+            let metadataTokens = MemoryTokenizer.tokenCount(of: metadataPrefix)
+            let contentCharacterLimit = remainingCharacters - metadataCharacters
+            let contentTokenLimit = remainingTokens - metadataTokens
+            guard contentCharacterLimit > 0, contentTokenLimit > 0 else {
                 continue
             }
+
+            let body = fittingRecentContent(
+                event.content,
+                characterLimit: contentCharacterLimit,
+                tokenLimit: contentTokenLimit
+            )
+            guard !body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                continue
+            }
+            let content = metadataPrefix + body
 
             selected.insert(
                 APIChatMessage(role: event.role.rawValue, content: content),
@@ -349,6 +390,14 @@ enum PromptAssembler {
             usedTokens += MemoryTokenizer.tokenCount(of: content)
         }
         return selected
+    }
+
+    private static func singleLineMetadataText(_ value: String) -> String {
+        let collapsed = value
+            .replacingOccurrences(of: "\r", with: " ")
+            .replacingOccurrences(of: "\n", with: " ")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return String(collapsed.prefix(32))
     }
 
     private static func fittingRecentContent(
@@ -396,7 +445,9 @@ enum PromptAssembler {
         _ events: [HistoricalPromptExcerpt],
         characterBudget: Int,
         tokenBudget: Int,
-        maxCount: Int
+        maxCount: Int,
+        timeContext: ConversationTimeContext?,
+        eventCutoff: Date?
     ) -> String {
         // These are hard ceilings even when a caller passes an accidentally huge
         // value, so untrusted history cannot turn this helper into an unbounded
@@ -415,6 +466,7 @@ enum PromptAssembler {
 
         for event in events {
             guard lines.count < maxCount,
+                  eventCutoff.map({ event.occurredAt <= $0 }) ?? true,
                   !event.redacted,
                   event.role == .user || event.role == .assistant,
                   !event.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
@@ -425,14 +477,17 @@ enum PromptAssembler {
             let remainingCharacters = characterBudget - usedCharacters - separatorCharacters
             let remainingTokens = tokenBudget - usedTokens
             guard remainingCharacters > 0, remainingTokens > 0 else { break }
+            let occurredAtText = event.occurredAt.formatted(.iso8601)
+            let timeHint = timeContext?.messageTimestampLine(for: event.occurredAt)
 
             let content = fittingHistoricalContent(
                 event.content,
                 role: event.role,
-                occurredAt: event.occurredAt,
+                occurredAtText: occurredAtText,
                 score: event.score,
                 characterLimit: remainingCharacters,
-                tokenLimit: remainingTokens
+                tokenLimit: remainingTokens,
+                timeHint: timeHint
             )
             guard !content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
                 continue
@@ -440,9 +495,10 @@ enum PromptAssembler {
 
             let line = historicalLine(
                 role: event.role,
-                occurredAt: event.occurredAt,
+                occurredAtText: occurredAtText,
                 score: event.score,
-                content: content
+                content: content,
+                timeHint: timeHint
             )
             let lineCharacters = line.count
             let lineTokens = MemoryTokenizer.tokenCount(of: line)
@@ -470,10 +526,11 @@ enum PromptAssembler {
     private static func fittingHistoricalContent(
         _ content: String,
         role: EventRole,
-        occurredAt: Date,
+        occurredAtText: String,
         score: Float,
         characterLimit: Int,
-        tokenLimit: Int
+        tokenLimit: Int,
+        timeHint: String?
     ) -> String {
         // Do not iterate an unbounded attacker-controlled string. The rendered
         // line must fit the caller's remaining budget, so no prefix longer than
@@ -487,9 +544,10 @@ enum PromptAssembler {
             let candidate = prefix + String(character)
             let line = historicalLine(
                 role: role,
-                occurredAt: occurredAt,
+                occurredAtText: occurredAtText,
                 score: score,
-                content: candidate
+                content: candidate,
+                timeHint: timeHint
             )
             guard line.count <= characterLimit,
                   MemoryTokenizer.tokenCount(of: line) <= tokenLimit else {
@@ -502,13 +560,16 @@ enum PromptAssembler {
 
     private static func historicalLine(
         role: EventRole,
-        occurredAt: Date,
+        occurredAtText: String,
         score: Float,
-        content: String
+        content: String,
+        timeHint: String?
     ) -> String {
         let safeScore = score.isFinite ? min(max(score, 0), 1) : 0
-        let date = occurredAt.formatted(.iso8601)
-        return "<excerpt role=\"\(role.rawValue)\" occurred_at=\"\(date)\" score=\"\(safeScore)\">\(escapeXML(content))</excerpt>"
+        let timeHint = timeHint
+            .map { " time_hint=\"\(escapeXML($0))\"" }
+            ?? ""
+        return "<excerpt role=\"\(role.rawValue)\" occurred_at=\"\(occurredAtText)\"\(timeHint) score=\"\(safeScore)\">\(escapeXML(content))</excerpt>"
     }
 
     private static func escapeXML(_ value: String) -> String {

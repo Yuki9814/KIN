@@ -164,6 +164,15 @@ private struct ProactiveGeneratedPair: Codable, Sendable {
     let followUp: String?
 }
 
+#if os(iOS)
+private struct ProactiveNotificationRequest: Sendable {
+    let route: ProactiveNotificationRoute
+    let title: String
+    let body: String
+    let scheduledAt: Date
+}
+#endif
+
 private struct ConversationCareTaskMetadata: Codable, Sendable {
     let sessionStartEventID: UUID
     let milestoneMinutes: Int
@@ -236,6 +245,11 @@ private struct AssistantStructuredReply: Codable, Sendable {
 private struct PreparedAssistantReply: Sendable {
     let content: String
     let payload: MessagePayload?
+}
+
+private struct ResolvedImageGenerationAccess: Sendable {
+    let configuration: ImageGenerationConfiguration
+    let apiKey: String
 }
 
 /// Incrementally hashes the complete source manifest without retaining all
@@ -439,11 +453,13 @@ final class AppModel {
     @ObservationIgnored private let container: ModelContainer
     @ObservationIgnored private let context: ModelContext
     @ObservationIgnored private let client: any AIClientProtocol
+    @ObservationIgnored private let imageGenerationClient: any ImageGenerationClientProtocol
     @ObservationIgnored private let memoryIndex: LocalMemorySearchIndex
     @ObservationIgnored private let conversationIndex: LocalConversationSearchIndex
     @ObservationIgnored private let readStateService: ReadStateService
     @ObservationIgnored private let dataDefaults: UserDefaults
     @ObservationIgnored private let apiKeyLoader: () throws -> String?
+    @ObservationIgnored private let imageGenerationAPIKeyLoader: () throws -> String?
     @ObservationIgnored private var generationTask: Task<Void, Never>?
     @ObservationIgnored private var groupGenerationTask: Task<Void, Never>?
     /// Presentation is durable, but the sleeper that advances a queue is
@@ -457,6 +473,9 @@ final class AppModel {
     @ObservationIgnored private var groupTurnGeneration = 0
     @ObservationIgnored private var presentationGeneration = 0
     @ObservationIgnored private var proactiveGenerationTask: Task<Void, Never>?
+    @ObservationIgnored private var proactiveNotificationReconciliationTask: Task<Void, Never>?
+    @ObservationIgnored private var proactiveNotificationReconciliationGeneration = 0
+    @ObservationIgnored private var proactivelyCancelledNotificationIDs: Set<UUID> = []
     @ObservationIgnored private var proactiveGenerationID: UUID?
     @ObservationIgnored private var proactiveGenerationSourceEventID: UUID?
     @ObservationIgnored private var proactiveGenerationRoleID: UUID?
@@ -533,10 +552,12 @@ final class AppModel {
     init(
         bootstrap: PersistenceBootstrap,
         client: any AIClientProtocol = OpenAICompatibleClient(),
+        imageGenerationClient: any ImageGenerationClientProtocol = OpenAICompatibleImageGenerationClient(),
         memoryIndex: LocalMemorySearchIndex = LocalMemorySearchIndex(),
         conversationIndex: LocalConversationSearchIndex = LocalConversationSearchIndex(),
         dataDefaults: UserDefaults = .standard,
         apiKeyLoader: (() throws -> String?)? = nil,
+        imageGenerationAPIKeyLoader: (() throws -> String?)? = nil,
         performLegacyConversationMigration: Bool = !appModelIsRunningTests,
         seedBuiltInCompanions: Bool = !appModelIsRunningTests
     ) {
@@ -544,6 +565,7 @@ final class AppModel {
         let modelContext = ModelContext(bootstrap.container)
         self.context = modelContext
         self.client = client
+        self.imageGenerationClient = imageGenerationClient
         self.memoryIndex = memoryIndex
         self.conversationIndex = conversationIndex
         self.dataDefaults = dataDefaults
@@ -553,6 +575,9 @@ final class AppModel {
         )
         self.apiKeyLoader = apiKeyLoader ?? {
             try SettingsStore.currentAPIKey(defaults: dataDefaults)
+        }
+        self.imageGenerationAPIKeyLoader = imageGenerationAPIKeyLoader ?? {
+            try SettingsStore.imageGenerationAPIKey()
         }
         self.isUsingCloud = bootstrap.usingCloud
         let pendingMigration = try? StorageMigrationJournal.load(defaults: dataDefaults)
@@ -729,6 +754,7 @@ final class AppModel {
         for task in presentationTasks.values { task.cancel() }
         presentationTasks.removeAll()
         proactiveGenerationTask?.cancel()
+        proactiveNotificationReconciliationTask?.cancel()
         for task in conversationCareGenerationTasks.values { task.cancel() }
         conversationCareGenerationTasks.removeAll()
         conversationCareGenerationIDs.removeAll()
@@ -1815,6 +1841,13 @@ final class AppModel {
     /// A real role/conversation switch still cancels in-flight work before the
     /// new transcript becomes visible, preventing a response from crossing roles.
     func selectCompanion(id roleID: UUID) throws {
+        try selectCompanion(id: roleID, conversationID: nil)
+    }
+
+    /// Opens a specific unarchived direct conversation when a durable route
+    /// supplies one, while preserving the existing most-recent fallback for
+    /// ordinary companion selection.
+    func selectCompanion(id roleID: UUID, conversationID preferredConversationID: UUID?) throws {
         let resolvedRoleID = RoleScope.resolve(roleID)
         let configuration = try companionConfiguration(for: resolvedRoleID)
         let descriptor = FetchDescriptor<ConversationRecord>(
@@ -1828,7 +1861,10 @@ final class AppModel {
             $0.resolvedRoleID == resolvedRoleID && !$0.archived
         }
         let conversation: ConversationRecord
-        if resolvedRoleID == RoleScope.legacyRoleID,
+        if let preferredConversationID,
+           let routed = roleConversations.first(where: { $0.id == preferredConversationID }) {
+            conversation = routed
+        } else if resolvedRoleID == RoleScope.legacyRoleID,
            let primary = roleConversations.first(where: { $0.id == Self.defaultConversationID }) {
             conversation = primary
         } else if let existing = roleConversations.first {
@@ -2011,9 +2047,171 @@ final class AppModel {
         }
     }
 
+    /// Records a WeChat-style poke as a visible system event, then asks the
+    /// current companion to continue naturally without treating the gesture as
+    /// a user message for affinity, memory extraction, or proactive scheduling.
+    func pokeCurrentCompanion() {
+        guard integrityConflict == nil else {
+            errorMessage = integrityConflictMessage
+            return
+        }
+        guard generationTask == nil,
+              !isGenerating,
+              activeChatUserEventID == nil else {
+            errorMessage = "角色正在回复，请稍后再拍一拍。"
+            return
+        }
+
+        reloadRelationship(for: currentRoleID)
+        guard canSendMessages else {
+            errorMessage = "这个角色已被替换，无法拍一拍。"
+            return
+        }
+        guard canDeliverDirectMessage else {
+            errorMessage = "对方当前无法接收拍一拍。"
+            return
+        }
+
+        let connection: ResolvedAIConnection
+        do {
+            connection = try resolvedAIConnection(for: currentRoleID)
+        } catch {
+            errorMessage = "无法读取当前角色的 AI 连接：\(error.localizedDescription)"
+            return
+        }
+        guard connection.configuration.isComplete else {
+            errorMessage = "请先在设置中完成当前角色的 AI 连接。"
+            return
+        }
+
+        let relationship: CompanionRelationshipRecord
+        do {
+            relationship = try ensureRelationshipRecord(for: currentRoleID)
+            try context.save()
+        } catch {
+            context.rollback()
+            errorMessage = "拍一拍暂时无法开始：\(error.localizedDescription)"
+            return
+        }
+
+        cancelActiveChatTurnForInterruption()
+        errorMessage = nil
+        resetConnectionTest()
+        lastUsedMemoriesByRole[currentRoleID] = []
+        cancelProactiveTasks(
+            for: currentRoleID,
+            includingConversationCare: false,
+            includingBirthday: false
+        )
+        let sourceMarkerBeforeInsert = conversationStoreMarker
+        let pokeEvent: ConversationEvent
+        do {
+            pokeEvent = try insertEvent(
+                role: .system,
+                content: "你拍了拍「\(persona.name)」",
+                deliveryState: .complete
+            )
+        } catch {
+            errorMessage = "拍一拍未能保存：\(error.localizedDescription)"
+            return
+        }
+
+        reloadMessages()
+        isGenerating = true
+        streamingText = ""
+        chatTurnGeneration &+= 1
+        let turnGeneration = chatTurnGeneration
+        activeChatUserEventID = pokeEvent.id
+        let operationOwner = conversationIndexOwner
+        let operationGeneration = operationOwner.generation
+        let operationRoleID = operationOwner.roleID
+        let operationPersona = persona
+        let operationWorld = resolvedWorldProfile(for: operationRoleID)
+        let operationWorldInstruction = worldInstruction(for: operationWorld)
+        let operationRelationshipRevision = relationship.revision
+
+        generationTask = Task { [weak self] in
+            guard let self else { return }
+            await self.performResponse(
+                userEvent: pokeEvent,
+                sourceMarkerBeforeInsert: sourceMarkerBeforeInsert,
+                configuration: connection.configuration,
+                apiKey: connection.credential,
+                generation: operationGeneration,
+                turnGeneration: turnGeneration,
+                roleID: operationRoleID,
+                relationshipRevision: operationRelationshipRevision,
+                owner: operationOwner,
+                persona: operationPersona,
+                worldProfile: operationWorld,
+                worldInstructionText: operationWorldInstruction,
+                continuationInstruction: "用户刚刚通过“拍一拍”轻触了你。请承接当前对话自然继续发言，不要解释这个功能，也不要复述这条指令。"
+            )
+        }
+    }
+
+    func generateImage(
+        prompt rawPrompt: String,
+        targetRoleID: UUID? = nil,
+        targetConversationID: UUID? = nil
+    ) {
+        guard validateDirectAttachmentTarget(
+            roleID: targetRoleID,
+            conversationID: targetConversationID
+        ) else { return }
+        let prompt = rawPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !prompt.isEmpty else {
+            errorMessage = "请先填写图片画面描述。"
+            return
+        }
+        send("/image \(prompt)")
+    }
+
+    /// Image generation is deliberately opt-in. Ordinary conversation text
+    /// remains on the chat provider; only the dedicated UI (or these explicit
+    /// slash commands) can route a prompt and the isolated image credential to
+    /// the image provider.
+    private static func explicitImageGenerationPrompt(from text: String) -> String? {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let lowercased = trimmed.lowercased()
+        let prefixes = ["/image", "/draw", "/生图", "生成图片：", "生成图片:", "生图：", "生图:"]
+        for prefix in prefixes {
+            let comparablePrefix = prefix.lowercased()
+            guard lowercased.hasPrefix(comparablePrefix) else { continue }
+            let boundary = trimmed.index(trimmed.startIndex, offsetBy: prefix.count)
+            if prefix.hasPrefix("/"), boundary < trimmed.endIndex {
+                let next = trimmed[boundary]
+                guard next.isWhitespace || next == ":" || next == "：" else { continue }
+            }
+            let prompt = String(trimmed[boundary...])
+                .trimmingCharacters(in: CharacterSet.whitespacesAndNewlines.union(
+                    CharacterSet(charactersIn: ":：")
+                ))
+            return prompt.isEmpty ? nil : prompt
+        }
+        return nil
+    }
+
+    private func resolvedImageGenerationAccess() throws -> ResolvedImageGenerationAccess {
+        let configuration = SettingsStore.imageGenerationConfiguration(defaults: dataDefaults)
+        guard configuration.isComplete else {
+            throw configuration.baseURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                ? ImageGenerationClientError.invalidBaseURL
+                : ImageGenerationClientError.missingModel
+        }
+        guard let apiKey = try imageGenerationAPIKeyLoader()?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+              !apiKey.isEmpty else {
+            throw ImageGenerationClientError.missingAPIKey
+        }
+        return ResolvedImageGenerationAccess(configuration: configuration, apiKey: apiKey)
+    }
+
     func send(_ rawText: String) {
-        let text = rawText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty else { return }
+        let submittedText = rawText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !submittedText.isEmpty else { return }
+        let requestedImagePrompt = Self.explicitImageGenerationPrompt(from: submittedText)
+        let text = requestedImagePrompt.map { "生成图片：\($0)" } ?? submittedText
         guard integrityConflict == nil else {
             errorMessage = integrityConflictMessage
             return
@@ -2035,21 +2233,34 @@ final class AppModel {
             || LocalMomentCommandParser.parseDeletion(text) != nil
             || (isMemoryEnabled && explicitMemoryDirective(in: text) != nil)
         let connection: ResolvedAIConnection?
+        let imageGenerationAccess: ResolvedImageGenerationAccess?
         let connectionFailureMessage: String?
-        do {
-            let resolved = try resolvedAIConnection(for: currentRoleID)
-            if resolved.configuration.isComplete {
-                connection = resolved
-                connectionFailureMessage = nil
-            } else {
-                connection = nil
-                connectionFailureMessage = "请先在设置中完成当前角色的 AI 连接。"
-            }
-        } catch {
+        if requestedImagePrompt != nil {
             connection = nil
-            connectionFailureMessage = "无法读取当前角色的 AI 连接：\(error.localizedDescription)"
+            do {
+                imageGenerationAccess = try resolvedImageGenerationAccess()
+                connectionFailureMessage = nil
+            } catch {
+                imageGenerationAccess = nil
+                connectionFailureMessage = error.localizedDescription
+            }
+        } else {
+            imageGenerationAccess = nil
+            do {
+                let resolved = try resolvedAIConnection(for: currentRoleID)
+                if resolved.configuration.isComplete {
+                    connection = resolved
+                    connectionFailureMessage = nil
+                } else {
+                    connection = nil
+                    connectionFailureMessage = "请先在设置中完成当前角色的 AI 连接。"
+                }
+            } catch {
+                connection = nil
+                connectionFailureMessage = "无法读取当前角色的 AI 连接：\(error.localizedDescription)"
+            }
         }
-        guard connection != nil || hasLocalAction else {
+        guard connection != nil || imageGenerationAccess != nil || hasLocalAction else {
             errorMessage = connectionFailureMessage
             return
         }
@@ -2079,18 +2290,16 @@ final class AppModel {
             relationship = try ensureRelationshipRecord(for: currentRoleID)
             if !BuiltInCompanionCatalog.contains(roleID: currentRoleID),
                relationship.lastAffinityEventID != userEvent.id {
-                let didPublishAffinityCG = try applyAffinity(
+                try applyAffinity(
                     text: text,
                     eventID: userEvent.id,
-                    to: relationship,
-                    now: userEvent.occurredAt
+                    to: relationship
                 )
                 relationship.updatedAt = userEvent.occurredAt
                 relationship.revision = max(0, relationship.revision) + 1
                 relationshipRecordRevision = relationship.revision
                 try context.save()
                 reloadCompanions()
-                if didPublishAffinityCG { reloadMomentFeed() }
             }
             // Built-in affinity is derived forever and must not advance the
             // relationship row. Saving still materializes any missing
@@ -2121,15 +2330,25 @@ final class AppModel {
             }
         }
 
-        let handledLocalMomentDeletion = handleMomentCommandIfRequested(from: userEvent)
+        let handledLocalMomentCommand = handleMomentCommandIfRequested(from: userEvent)
 
         reloadMessages()
-        if handledLocalMomentDeletion {
-            // Deletion is a deterministic local capability with its own
-            // assistant acknowledgement. Do not ask a provider to repeat or
-            // contradict a destructive action that has already completed.
+        if handledLocalMomentCommand {
+            // Moment creation and deletion are deterministic local capabilities
+            // with their own durable assistant receipt. Do not ask a provider
+            // to repeat or pretend that either action happened.
             isGenerating = false
             streamingText = ""
+            return
+        }
+        if let requestedImagePrompt, let imageGenerationAccess {
+            startImageGeneration(
+                prompt: requestedImagePrompt,
+                access: imageGenerationAccess,
+                userEvent: userEvent,
+                sourceMarkerBeforeInsert: sourceMarkerBeforeInsert,
+                relationshipRevision: relationship.revision
+            )
             return
         }
         guard let connection else {
@@ -2321,11 +2540,10 @@ final class AppModel {
             relationship = try ensureRelationshipRecord(for: currentRoleID)
             if !BuiltInCompanionCatalog.contains(roleID: currentRoleID),
                relationship.lastAffinityEventID != userEvent.id {
-                _ = try applyAffinity(
+                try applyAffinity(
                     text: content,
                     eventID: userEvent.id,
-                    to: relationship,
-                    now: userEvent.occurredAt
+                    to: relationship
                 )
                 relationship.updatedAt = userEvent.occurredAt
                 relationship.revision = max(0, relationship.revision) + 1
@@ -2844,11 +3062,18 @@ final class AppModel {
                 revision: 1,
                 deviceID: deviceID
             ))
+            var didUpdateAffinity = false
             var insertedReplyTask = false
             if post.authorKind == .companion,
                let authorRoleID = post.authorRoleID,
                try momentRoleCanPublish(roleID: authorRoleID) {
                 let roleID = RoleScope.resolve(authorRoleID)
+                didUpdateAffinity = try applyAffinityInteractionDelta(
+                    kind: .like,
+                    roleID: roleID,
+                    eventID: likeID,
+                    now: now
+                )
                 let actionID = UUID()
                 let key = momentAIInteractionKey(
                     kind: .replyLike,
@@ -2873,6 +3098,7 @@ final class AppModel {
                 context.rollback()
                 throw error
             }
+            if didUpdateAffinity { reloadCompanions() }
             reloadMomentFeed()
             if insertedReplyTask {
                 momentStatusText = "正在等待动态作者回应。"
@@ -2904,6 +3130,46 @@ final class AppModel {
         try addComment(postID: postID, text: rawBody, parentInteractionID: nil)
     }
 
+    /// Soft-deletes one user-owned root/reply comment without touching the
+    /// post or any other actor's interaction. Deletion is safe to repeat for
+    /// the same comment and cancels every queued AI reply whose parent, target
+    /// or root points at this comment.
+    func deleteUserMomentComment(id: UUID, postID: UUID) throws {
+        guard let comment = try canonicalMomentInteraction(id: id, postID: postID),
+              comment.actorKind == .user,
+              comment.kind == .comment else {
+            throw AppModelMomentError.interactionUnavailable
+        }
+        guard comment.deletedAt == nil else {
+            reloadMomentFeed()
+            return
+        }
+
+        let now = Date()
+        comment.softDelete(at: now, deviceID: deviceID)
+        let relatedTasks = canonicalMomentAIInteractionTasks().filter {
+            $0.postID == postID
+                && !$0.state.isTerminal
+                && (
+                    $0.targetInteractionID == id
+                        || $0.parentInteractionID == id
+                        || $0.rootInteractionID == id
+                )
+        }
+        for task in relatedTasks {
+            momentReactionTasks[task.id]?.cancel()
+            momentReactionTasks[task.id] = nil
+            cancelMomentAIInteractionTaskRecord(
+                task,
+                message: "用户评论已删除。",
+                now: now
+            )
+        }
+        try context.save()
+        refreshMomentAIInteractionFlags()
+        reloadMomentFeed()
+    }
+
     func addComment(
         postID: UUID,
         text rawBody: String,
@@ -2918,7 +3184,12 @@ final class AppModel {
         let parent: MomentInteractionRecord?
         if let parentInteractionID {
             parent = try context.fetch(FetchDescriptor<MomentInteractionRecord>())
-                .filter { $0.id == parentInteractionID && $0.postID == postID && $0.kind == .comment }
+                .filter {
+                    $0.id == parentInteractionID
+                        && $0.postID == postID
+                        && $0.kind == .comment
+                        && $0.deletedAt == nil
+                }
                 .max { lhs, rhs in
                     if lhs.revision != rhs.revision { return lhs.revision < rhs.revision }
                     if lhs.updatedAt != rhs.updatedAt { return lhs.updatedAt < rhs.updatedAt }
@@ -2943,6 +3214,31 @@ final class AppModel {
             revision: 1,
             deviceID: deviceID
         ))
+
+        // A root comment on the user's own post has no unambiguous role
+        // target, so it must not increase every companion's affinity. A
+        // comment on a companion post, or a reply to a known companion
+        // comment, has exactly one explicit role target.
+        let interactionAffinityRoleID: UUID? = {
+            if post.authorKind == .companion {
+                return post.authorRoleID.map(RoleScope.resolve)
+            }
+            if parent?.actorKind == .companion {
+                return parent?.actorRoleID.map(RoleScope.resolve)
+            }
+            return nil
+        }()
+        let didUpdateAffinity: Bool
+        if let interactionAffinityRoleID {
+            didUpdateAffinity = try applyAffinityInteractionDelta(
+                kind: .comment,
+                roleID: interactionAffinityRoleID,
+                eventID: commentID,
+                now: now
+            )
+        } else {
+            didUpdateAffinity = false
+        }
 
         let rootInteractionID = parent?.rootInteractionID ?? parent?.id ?? commentID
         let responderRoleIDs: [UUID]
@@ -2994,6 +3290,7 @@ final class AppModel {
             context.rollback()
             throw error
         }
+        if didUpdateAffinity { reloadCompanions() }
         reloadMomentFeed()
         if insertedTaskCount > 0 {
             momentStatusText = "正在等待好友回复。"
@@ -3130,6 +3427,78 @@ final class AppModel {
         )
     }
 
+    /// Pokes one concrete group member and routes the continuation through the
+    /// same durable group-reply pipeline, without applying @mention affinity.
+    func pokeGroupCompanion(roleID rawRoleID: UUID, conversationID: UUID) {
+        guard integrityConflict == nil else {
+            errorMessage = integrityConflictMessage
+            return
+        }
+        guard groupConversations.contains(where: { $0.conversationID == conversationID }) else {
+            errorMessage = "这个群聊已经不存在。"
+            return
+        }
+        guard activeGroupConversationID == conversationID else {
+            errorMessage = "群聊已切换，请在当前群聊中重新拍一拍。"
+            return
+        }
+        guard groupGenerationTask == nil,
+              !isGeneratingGroupReply,
+              activeGroupUserEventID == nil else {
+            errorMessage = "群成员正在回复，请稍后再拍一拍。"
+            return
+        }
+
+        let roleID = RoleScope.resolve(rawRoleID)
+        guard let member = groupParticipants(conversationID: conversationID).first(where: {
+            $0.kind == .companion && $0.roleID.map(RoleScope.resolve) == roleID
+        }) else {
+            errorMessage = "这个角色已不在群聊中。"
+            return
+        }
+        do {
+            let connection = try resolvedAIConnection(for: roleID)
+            guard connection.configuration.isComplete else {
+                errorMessage = "请先在设置中完成\(member.displayName)的 AI 连接。"
+                return
+            }
+        } catch {
+            errorMessage = "无法读取\(member.displayName)的 AI 连接：\(error.localizedDescription)"
+            return
+        }
+
+        let pokeEvent: ConversationEvent
+        do {
+            pokeEvent = try insertGroupEvent(
+                conversationID: conversationID,
+                role: .system,
+                content: "你拍了拍「\(member.displayName)」",
+                deliveryState: .complete,
+                roleID: nil,
+                senderRoleID: nil
+            )
+        } catch {
+            errorMessage = "拍一拍未能保存：\(error.localizedDescription)"
+            return
+        }
+
+        reloadGroupMessages(conversationID: conversationID)
+        isGeneratingGroupReply = true
+        groupTurnGeneration &+= 1
+        let turnGeneration = groupTurnGeneration
+        activeGroupUserEventID = pokeEvent.id
+        errorMessage = nil
+        groupGenerationTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            await self.performGroupResponses(
+                userEvent: pokeEvent,
+                turnGeneration: turnGeneration,
+                mentionedRoleIDs: [roleID],
+                continuationInstruction: "用户刚刚在群聊中通过“拍一拍”轻触了你。请由你承接当前话题自然继续发言，不要解释这个功能，也不要复述这条指令。"
+            )
+        }
+    }
+
     func sendGroupSticker(stickerID: String, conversationID: UUID) {
         guard let sticker = StickerCatalog.item(for: stickerID) else { return }
         sendGroupPayload(
@@ -3241,6 +3610,24 @@ final class AppModel {
             errorMessage = "群聊消息未能保存：\(error.localizedDescription)"
             return
         }
+        // A group turn has no single implicit relationship target. Only the
+        // role IDs explicitly selected by the @-mention UI may receive an
+        // affinity event; an unmentioned turn must not broadcast a score
+        // change to every participant. The message itself is already durable,
+        // so a scoring failure is recorded without dropping the user turn.
+        do {
+            if try applyAffinityForExplicitGroupMentions(
+                userEvent: userEvent,
+                conversationID: conversationID,
+                mentionedRoleIDs: mentionedRoleIDs
+            ) {
+                try context.save()
+                reloadCompanions()
+            }
+        } catch {
+            context.rollback()
+            appendPersistenceNotice("群聊好感度暂未更新：\(error.localizedDescription)")
+        }
         activeGroupConversationID = conversationID
         reloadGroupMessages(conversationID: conversationID)
         isGeneratingGroupReply = true
@@ -3256,6 +3643,56 @@ final class AppModel {
                 mentionedRoleIDs: mentionedRoleIDs
             )
         }
+    }
+
+    private func applyAffinityForExplicitGroupMentions(
+        userEvent: ConversationEvent,
+        conversationID: UUID,
+        mentionedRoleIDs: Set<UUID>
+    ) throws -> Bool {
+        guard !mentionedRoleIDs.isEmpty else { return false }
+        let participantRows = try context.fetch(FetchDescriptor<GroupParticipantRecord>())
+            .filter {
+                $0.conversationID == conversationID
+                    && $0.participantKind == .companion
+                    && $0.lifecycle == .active
+                    && $0.leftAt == nil
+                    && $0.participantRoleID != nil
+            }
+        let participantRoleIDs = Set(
+            participantRows.compactMap { $0.participantRoleID.map(RoleScope.resolve) }
+        )
+        let targets = mentionedRoleIDs
+            .map(RoleScope.resolve)
+            .filter { participantRoleIDs.contains($0) }
+        guard !targets.isEmpty else { return false }
+
+        var changed = false
+        for roleID in Set(targets) {
+            guard let relationship = try relationshipRecord(for: roleID),
+                  relationship.state == .accepted,
+                  relationship.retiredAt == nil,
+                  relationship.contactMembership == .active else {
+                continue
+            }
+            let previousEventID = relationship.lastAffinityEventID
+            let previousScore = relationship.affinityScore
+            try applyAffinity(
+                text: userEvent.content,
+                eventID: userEvent.id,
+                to: relationship
+            )
+            guard previousEventID != relationship.lastAffinityEventID,
+                  relationship.lastAffinityEventID == userEvent.id,
+                  previousScore != relationship.affinityScore else {
+                continue
+            }
+            relationship.updatedAt = userEvent.occurredAt
+            relationship.revision = max(0, relationship.revision) + 1
+            relationship.deviceID = deviceID
+            changed = true
+        }
+        return changed
     }
 
     /// Persists one text-only Moments instruction. A time in the past means
@@ -3476,8 +3913,7 @@ final class AppModel {
             deleteMomentCommand(command, from: event)
             return true
         }
-        scheduleMomentCommandIfRequested(from: event)
-        return false
+        return scheduleMomentCommandIfRequested(from: event)
     }
 
     private func deleteMomentCommand(
@@ -3567,11 +4003,11 @@ final class AppModel {
             .lowercased()
     }
 
-    private func scheduleMomentCommandIfRequested(from event: ConversationEvent) {
+    private func scheduleMomentCommandIfRequested(from event: ConversationEvent) -> Bool {
         guard event.role == .user,
               event.deliveryState == .complete,
               let command = LocalMomentCommandParser.parse(event.content) else {
-            return
+            return false
         }
         let taskID = stableUUID(seed: "chat-moment:\(event.id.uuidString.lowercased())")
         do {
@@ -3581,12 +4017,18 @@ final class AppModel {
                 scheduledAt: command.scheduledAt,
                 taskID: taskID
             )
-            showMomentCommandNotice(
-                command.confirmationText(now: Date(), calendar: .autoupdatingCurrent)
+            let confirmation = command.confirmationText(
+                now: Date(),
+                calendar: .autoupdatingCurrent
             )
+            showMomentCommandNotice(confirmation)
+            persistLocalMomentCommandReply(confirmation, parentEventID: event.id)
         } catch {
-            showMomentCommandNotice("朋友圈任务未能保存：\(boundedMomentError(error))")
+            let message = "朋友圈任务未能保存：\(boundedMomentError(error))"
+            showMomentCommandNotice(message)
+            persistLocalMomentCommandReply(message, parentEventID: event.id)
         }
+        return true
     }
 
     private func showMomentCommandNotice(_ text: String) {
@@ -4005,7 +4447,42 @@ final class AppModel {
         }
         try context.save()
         reloadMomentTasks()
+        persistMomentPublicationReceipt(taskID: claim.id, text: text)
         return true
+    }
+
+    /// Chat-triggered Moment tasks use a deterministic task ID derived from
+    /// their user event. Once the leased task has actually published, append a
+    /// second durable receipt so the chat distinguishes scheduling from the
+    /// completed side effect. Standalone scheduled tasks have no parent event
+    /// and therefore do not create a chat receipt.
+    private func persistMomentPublicationReceipt(taskID: UUID, text: String) {
+        guard let parentEventID = ((try? context.fetch(FetchDescriptor<ConversationEvent>())) ?? [])
+            .first(where: { event in
+                event.role == .user
+                    && event.deliveryState == .complete
+                    && stableUUID(seed: "chat-moment:\(event.id.uuidString.lowercased())") == taskID
+            })?.id else {
+            return
+        }
+        do {
+            let hasReceipt = try context.fetch(FetchDescriptor<ConversationEvent>())
+                .contains {
+                    $0.role == .assistant
+                        && $0.parentEventID == parentEventID
+                        && $0.content.hasPrefix("已实际发布朋友圈")
+                }
+            guard !hasReceipt else { return }
+            let body = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            let preview = body.isEmpty ? "（无文字）" : String(body.prefix(36))
+            persistLocalMomentCommandReply(
+                "已实际发布朋友圈：\(preview)",
+                parentEventID: parentEventID
+            )
+            reloadMessages()
+        } catch {
+            errorMessage = "朋友圈发布结果未能写入聊天：\(error.localizedDescription)"
+        }
     }
 
     private func releaseMomentTask(
@@ -4209,6 +4686,7 @@ final class AppModel {
 
     private func cancelProactiveTasks(triggeredBy eventIDs: Set<UUID>, roleID: UUID) {
         cancelActiveProactiveGeneration(triggeredBy: eventIDs)
+        cancelProactiveNotificationReconciliation()
         let conversationID = currentConversation.id
         let rows = ((try? context.fetch(FetchDescriptor<ProactiveMessageTaskRecord>())) ?? [])
             .filter {
@@ -4226,10 +4704,7 @@ final class AppModel {
             row.updatedAt = now
             row.revision += 1
         }
-        #if os(iOS)
-        let notificationIDs = rows.map(\.id)
-        Task { await ProactiveNotificationService.shared.cancel(ids: notificationIDs) }
-        #endif
+        cancelProactiveNotifications(for: rows.map(\.id))
     }
 
     private func cancelActiveProactiveGeneration(triggeredBy eventIDs: Set<UUID>) {
@@ -5068,6 +5543,9 @@ final class AppModel {
     /// Replaces the local source-of-truth records with a fully validated backup.
     /// The API key and this device's CloudKit toggle are intentionally untouched.
     func restoreData(from data: Data) async throws -> DataImportSummary {
+        cancelProactiveNotificationReconciliation()
+        let replacedProactiveNotificationIDs =
+            ((try? context.fetch(FetchDescriptor<ProactiveMessageTaskRecord>())) ?? []).map(\.id)
         cancelAllChatTurnTasks(markPending: true)
         dataGeneration &+= 1
         generationTask?.cancel()
@@ -5109,6 +5587,8 @@ final class AppModel {
                 context: context,
                 defaults: dataDefaults
             )
+            cancelProactiveNotifications(for: replacedProactiveNotificationIDs)
+            proactivelyCancelledNotificationIDs.removeAll()
             // A full replacement invalidates any quarantine from the old
             // source. Reconcile before the forced catalog migration so a late
             // CloudKit physical copy cannot gain priority through migration.
@@ -5197,6 +5677,9 @@ final class AppModel {
     /// with one fresh deterministic session. Keychain data is intentionally
     /// outside this operation and is therefore preserved.
     func clearAllLocalData() async throws {
+        cancelProactiveNotificationReconciliation()
+        let clearedProactiveNotificationIDs =
+            ((try? context.fetch(FetchDescriptor<ProactiveMessageTaskRecord>())) ?? []).map(\.id)
         let retainedRoleID = currentRoleID
         cancelAllChatTurnTasks(markPending: true)
         dataGeneration &+= 1
@@ -5309,6 +5792,8 @@ final class AppModel {
                 forKey: SettingsKeys.readStateStorageMigrationVersion
             )
             try context.save()
+            cancelProactiveNotifications(for: clearedProactiveNotificationIDs)
+            proactivelyCancelledNotificationIDs.removeAll()
 
             currentConversation = freshConversation
             reloadRelationship(for: retainedRoleID)
@@ -6016,6 +6501,146 @@ final class AppModel {
         streamingText = ""
     }
 
+    private func startImageGeneration(
+        prompt: String,
+        access: ResolvedImageGenerationAccess,
+        userEvent: ConversationEvent,
+        sourceMarkerBeforeInsert: String?,
+        relationshipRevision: Int
+    ) {
+        isGenerating = true
+        streamingText = ""
+        chatTurnGeneration &+= 1
+        let turnGeneration = chatTurnGeneration
+        activeChatUserEventID = userEvent.id
+        let owner = conversationIndexOwner
+        let generation = owner.generation
+        let roleID = owner.roleID
+
+        generationTask = Task { [weak self] in
+            guard let self else { return }
+            await self.performImageGeneration(
+                prompt: prompt,
+                access: access,
+                userEvent: userEvent,
+                sourceMarkerBeforeInsert: sourceMarkerBeforeInsert,
+                generation: generation,
+                turnGeneration: turnGeneration,
+                roleID: roleID,
+                relationshipRevision: relationshipRevision,
+                owner: owner
+            )
+        }
+    }
+
+    private func performImageGeneration(
+        prompt: String,
+        access: ResolvedImageGenerationAccess,
+        userEvent: ConversationEvent,
+        sourceMarkerBeforeInsert: String?,
+        generation: Int,
+        turnGeneration: Int,
+        roleID: UUID,
+        relationshipRevision: Int,
+        owner: ConversationIndexOwner
+    ) async {
+        defer {
+            clearChatTurnIfCurrent(
+                userEventID: userEvent.id,
+                turnGeneration: turnGeneration
+            )
+        }
+        do {
+            guard generation == dataGeneration,
+                  turnGeneration == chatTurnGeneration,
+                  integrityConflict == nil,
+                  isCurrentAcceptedRelationship(
+                    roleID: roleID,
+                    revision: relationshipRevision
+                  ) else {
+                return
+            }
+            await updateConversationIndex(
+                with: userEvent,
+                previousSourceMarker: sourceMarkerBeforeInsert,
+                owner: owner
+            )
+            try Task.checkCancellation()
+            guard generation == dataGeneration,
+                  turnGeneration == chatTurnGeneration,
+                  integrityConflict == nil,
+                  isCurrentAcceptedRelationship(
+                    roleID: roleID,
+                    revision: relationshipRevision
+                  ) else {
+                return
+            }
+
+            let result = try await imageGenerationClient.generateImage(
+                prompt: prompt,
+                configuration: access.configuration,
+                apiKey: access.apiKey
+            )
+            try Task.checkCancellation()
+            guard generation == dataGeneration,
+                  turnGeneration == chatTurnGeneration,
+                  integrityConflict == nil,
+                  currentRoleID == roleID,
+                  currentConversation.id == userEvent.conversationID,
+                  isCurrentAcceptedRelationship(
+                    roleID: roleID,
+                    revision: relationshipRevision
+                  ) else {
+                return
+            }
+
+            let accessibilityText = result.revisedPrompt
+                .flatMap { value -> String? in
+                    let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+                    return trimmed.isEmpty ? nil : "生成图片：\(trimmed)"
+                }
+                ?? "生成图片：\(prompt)"
+            let assistantEvent = try insertEvent(
+                role: .assistant,
+                content: accessibilityText,
+                deliveryState: .complete,
+                parentEventID: userEvent.id,
+                payload: .image(result.data, accessibilityText: accessibilityText)
+            )
+            reloadMessages()
+            await updateConversationIndex(with: assistantEvent, owner: owner)
+            guard generation == dataGeneration,
+                  turnGeneration == chatTurnGeneration,
+                  integrityConflict == nil else {
+                return
+            }
+            if directUserSourceEventIsEligible(
+                id: userEvent.id,
+                conversationID: userEvent.conversationID,
+                roleID: roleID
+            ) {
+                processRelationshipAfterCompletedTurn(userEvent, roleID: roleID)
+            }
+        } catch is CancellationError {
+            guard generation == dataGeneration,
+                  turnGeneration == chatTurnGeneration,
+                  integrityConflict == nil else {
+                return
+            }
+            reloadMessages()
+            await markConversationIndexSourceCurrentIfClean(owner: owner)
+        } catch {
+            guard generation == dataGeneration,
+                  turnGeneration == chatTurnGeneration,
+                  integrityConflict == nil else {
+                return
+            }
+            errorMessage = error.localizedDescription
+            reloadMessages()
+            await markConversationIndexSourceCurrentIfClean(owner: owner)
+        }
+    }
+
     private func performResponse(
         userEvent: ConversationEvent,
         sourceMarkerBeforeInsert: String?,
@@ -6028,7 +6653,8 @@ final class AppModel {
         owner: ConversationIndexOwner,
         persona: PersonaConfiguration,
         worldProfile: AyaneWorldProfileExport,
-        worldInstructionText: String
+        worldInstructionText: String,
+        continuationInstruction: String? = nil
     ) async {
         guard generation == dataGeneration,
               turnGeneration == chatTurnGeneration,
@@ -6177,7 +6803,7 @@ final class AppModel {
                 return
             }
             let historicalTokenBudget = SettingsStore.rawHistoryTokenBudget(defaults: dataDefaults)
-            let prompt = PromptAssembler.assemble(
+            var prompt = PromptAssembler.assemble(
                 persona: persona,
                 retrieved: results,
                 recentEvents: recent,
@@ -6195,6 +6821,11 @@ final class AppModel {
                 ),
                 historicalTokenBudget: historicalTokenBudget
             )
+            if let continuationInstruction = continuationInstruction?
+                .trimmingCharacters(in: .whitespacesAndNewlines),
+               !continuationInstruction.isEmpty {
+                prompt.append(APIChatMessage(role: "user", content: continuationInstruction))
+            }
 
             let response: String
             if configuration.streamsResponses {
@@ -6473,11 +7104,15 @@ final class AppModel {
     private func performGroupResponses(
         userEvent: ConversationEvent,
         turnGeneration: Int,
-        mentionedRoleIDs: Set<UUID>
+        mentionedRoleIDs: Set<UUID>,
+        continuationInstruction: String? = nil
     ) async {
         let conversationID = userEvent.conversationID
+        let generation = dataGeneration
         do {
-            guard turnGeneration == groupTurnGeneration else {
+            guard generation == dataGeneration,
+                  turnGeneration == groupTurnGeneration,
+                  integrityConflict == nil else {
                 throw CancellationError()
             }
             let participantRows = ((try? context.fetch(FetchDescriptor<GroupParticipantRecord>())) ?? [])
@@ -6549,6 +7184,12 @@ final class AppModel {
                 } else {
                     queryEmbedding = nil
                 }
+                guard generation == dataGeneration,
+                      turnGeneration == groupTurnGeneration,
+                      activeGroupConversationID == conversationID,
+                      integrityConflict == nil else {
+                    throw CancellationError()
+                }
                 let snapshots = SettingsStore.autoExtractMemory(defaults: dataDefaults)
                     ? try await memorySnapshotsForSearch(
                         query: userEvent.content,
@@ -6557,6 +7198,12 @@ final class AppModel {
                         roleID: roleID
                     )
                     : []
+                guard generation == dataGeneration,
+                      turnGeneration == groupTurnGeneration,
+                      activeGroupConversationID == conversationID,
+                      integrityConflict == nil else {
+                    throw CancellationError()
+                }
                 let memories = MemoryEngine.shared.search(
                     userEvent.content,
                     in: snapshots,
@@ -6575,19 +7222,34 @@ final class AppModel {
                     )
                 )
                 let currentTimeline = fetchGroupEvents(conversationID: conversationID)
-                let prompt = PromptAssembler.assemble(
+                let boundedTimeline = Self.events(currentTimeline, through: userEvent)
+                var seenEventIDs = Set<UUID>()
+                if let duplicateEventID = boundedTimeline.first(where: {
+                    !seenEventIDs.insert($0.id).inserted
+                })?.id {
+                    recordIntegrityConflict(.eventConflict(duplicateEventID))
+                    throw CancellationError()
+                }
+                let promptTimeline = boundedTimeline
+                    .filter { !conflictedEventIDs.contains($0.id) }
+                var prompt = PromptAssembler.assemble(
                     persona: rolePersona,
                     retrieved: memories,
-                    recentEvents: Array(currentTimeline.suffix(40)),
+                    recentEvents: Array(promptTimeline.suffix(40)),
                     context: groupPromptConversationContext(
                         conversationID: conversationID,
                         speakingRoleID: roleID,
-                        timeline: currentTimeline,
+                        timeline: promptTimeline,
                         currentUserEventID: userEvent.id,
                         worldProfile: roleWorld,
                         worldInstructionText: roleWorldInstruction
                     )
                 )
+                if let continuationInstruction = continuationInstruction?
+                    .trimmingCharacters(in: .whitespacesAndNewlines),
+                   !continuationInstruction.isEmpty {
+                    prompt.append(APIChatMessage(role: "user", content: continuationInstruction))
+                }
                 let response: String
                 if configuration.streamsResponses {
                     var buffer = ""
@@ -6597,6 +7259,11 @@ final class AppModel {
                         apiKey: apiKey
                     ) {
                         try Task.checkCancellation()
+                        guard generation == dataGeneration,
+                              turnGeneration == groupTurnGeneration,
+                              integrityConflict == nil else {
+                            throw CancellationError()
+                        }
                         buffer += delta
                     }
                     response = buffer.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -6606,6 +7273,12 @@ final class AppModel {
                         configuration: configuration,
                         apiKey: apiKey
                     ).trimmingCharacters(in: .whitespacesAndNewlines)
+                }
+                guard generation == dataGeneration,
+                      turnGeneration == groupTurnGeneration,
+                      activeGroupConversationID == conversationID,
+                      integrityConflict == nil else {
+                    throw CancellationError()
                 }
                 guard !response.isEmpty else { throw AIClientError.emptyResponse }
                 let preparedReply = prepareAssistantReply(response)
@@ -6779,26 +7452,39 @@ final class AppModel {
         let namesByRole = Dictionary(uniqueKeysWithValues:
             (companions + archivedCompanions).map { ($0.id, $0.name) }
         )
-        let history = timeline.suffix(16).map { event -> String in
-            if event.role == .user { return "用户：\(event.content)" }
-            let name = event.senderRoleID.flatMap { namesByRole[$0] } ?? "角色"
-            return "\(name)：\(event.content)"
-        }
         let boundWorld = worldProfile ?? resolvedWorldProfile(for: speakingRoleID)
         let boundWorldInstruction = worldInstructionText ?? worldInstruction(for: boundWorld)
         let timeZone = TimeZone(identifier: boundWorld.timezoneIdentifier) ?? .current
-        let previousMessages = timeline.filter { $0.id != currentUserEventID }.map {
+        let currentEvent = timeline.first { $0.id == currentUserEventID }
+        let promptTimeline = currentEvent
+            .map { Self.events(timeline, through: $0) }
+            ?? timeline.filter { $0.occurredAt <= now }
+        let previousMessages = promptTimeline.filter { $0.id != currentUserEventID }.map {
             ConversationTimeMessage(
                 occurredAt: $0.occurredAt,
                 role: $0.role,
                 deliveryState: $0.deliveryState
             )
         }
+        let timeEnabled = SettingsStore.timeInjectionEnabled(defaults: dataDefaults)
+        let time = timeEnabled
+            ? ConversationTimeContext(
+                now: now,
+                timeZone: timeZone,
+                messages: previousMessages
+            )
+            : nil
+        var senderLabels: [UUID: String] = [:]
+        for event in promptTimeline where !conflictedEventIDs.contains(event.id) {
+            let label = event.role == .user
+                ? "用户"
+                : event.senderRoleID.flatMap { namesByRole[$0] } ?? "角色"
+            senderLabels[event.id] = label
+        }
         let affinity = effectiveAffinityScore(for: speakingRoleID)
         let memoryResetCutoff = latestRoleMemoryResetCutoff(roleID: speakingRoleID)
         var facts = ["当前群聊：\(group?.name ?? "群聊")"]
         if let group { facts.append("群成员：\(group.participantNames.joined(separator: "、"))") }
-        facts.append(contentsOf: history)
         let summary = ((try? context.fetch(FetchDescriptor<MemorySummaryRecord>())) ?? [])
             .filter {
                 $0.conversationID == conversationID
@@ -6816,13 +7502,10 @@ final class AppModel {
             sharedReality: boundWorldInstruction,
             groupFacts: facts,
             affinityInstruction: AffinityPolicy.promptLine(for: affinity),
-            timeInstruction: SettingsStore.timeInjectionEnabled(defaults: dataDefaults)
-                ? ConversationTimeContext(
-                    now: now,
-                    timeZone: timeZone,
-                    messages: previousMessages
-                ).promptLine
-                : "",
+            timeInstruction: time?.promptLine ?? "",
+            messageTimeContext: time,
+            messageSenderLabels: senderLabels,
+            eventCutoff: promptTimeline.map(\.occurredAt).max() ?? currentEvent?.occurredAt ?? now,
             rollingSummary: summary
         )
     }
@@ -6860,13 +7543,13 @@ final class AppModel {
             }
             do {
                 let affinity = self.effectiveAffinityScore(for: roleID)
-                let followUpEnabled = SettingsStore.proactiveFollowUpEnabled(
+                let followUpEnabledForPrompt = SettingsStore.proactiveFollowUpEnabled(
                     defaults: self.dataDefaults
                 )
                 let followUpDays = SettingsStore.proactiveFollowUpDayRange(
                     defaults: self.dataDefaults
                 )
-                let followUpInstruction = followUpEnabled
+                let followUpInstruction = followUpEnabledForPrompt
                     ? "如果用户仍未回复，第二条用于 \(followUpDays.lowerBound)–\(followUpDays.upperBound) 天后的最后一次跟进。"
                     : "未回复跟进已关闭，只写第一条主动问候；follow_up 字段返回空字符串。"
                 let prompt = """
@@ -6894,24 +7577,62 @@ final class AppModel {
                           conversationID: userEvent.conversationID,
                           roleID: roleID
                       ) else { return }
+                let followUpEnabled = SettingsStore.proactiveFollowUpEnabled(
+                    defaults: self.dataDefaults
+                )
                 let pair = self.parseProactivePair(raw, personaName: persona.name)
                 let encoded = try JSONEncoder().encode(pair)
+                let encodedText = String(data: encoded, encoding: .utf8) ?? ""
                 let quiet = SettingsStore.proactiveQuietHours(defaults: self.dataDefaults)
-                let scheduledAt = ProactiveMessagePolicy.scheduledDate(
+                let initialScheduledAt = ProactiveMessagePolicy.scheduledDate(
                     from: userEvent.occurredAt,
                     affinityScore: affinity,
                     followUpCount: 0,
                     quietStartHour: quiet.start,
                     quietEndHour: quiet.end
                 )
-                let task = ProactiveMessageTaskRecord(
+                let initialKey = "proactive:\(roleID.uuidString.lowercased()):\(userEvent.id.uuidString.lowercased())"
+                let followUpText = pair.followUp?.trimmingCharacters(in: .whitespacesAndNewlines)
+                let followUpTask: ProactiveMessageTaskRecord?
+                if followUpEnabled,
+                   let followUpText,
+                   !followUpText.isEmpty {
+                    let followUpScheduledAt = ProactiveMessagePolicy.scheduledDate(
+                        from: initialScheduledAt,
+                        affinityScore: affinity,
+                        followUpCount: 1,
+                        followUpDelayRange: SettingsStore.proactiveFollowUpDelayRange(
+                            defaults: self.dataDefaults
+                        ),
+                        quietStartHour: quiet.start,
+                        quietEndHour: quiet.end
+                    )
+                    followUpTask = ProactiveMessageTaskRecord(
+                        roleID: roleID,
+                        conversationID: userEvent.conversationID,
+                        scheduledAt: followUpScheduledAt,
+                        followUpCount: 1,
+                        state: .scheduled,
+                        idempotencyKey: initialKey + ":follow-up",
+                        generatedText: encodedText,
+                        lastUserEventID: userEvent.id,
+                        scheduledFromUserAt: userEvent.occurredAt,
+                        createdAt: Date(),
+                        updatedAt: Date(),
+                        revision: 1,
+                        deviceID: self.deviceID
+                    )
+                } else {
+                    followUpTask = nil
+                }
+                let initialTask = ProactiveMessageTaskRecord(
                     roleID: roleID,
                     conversationID: userEvent.conversationID,
-                    scheduledAt: scheduledAt,
+                    scheduledAt: initialScheduledAt,
                     followUpCount: 0,
                     state: .scheduled,
-                    idempotencyKey: "proactive:\(roleID.uuidString.lowercased()):\(userEvent.id.uuidString.lowercased())",
-                    generatedText: String(data: encoded, encoding: .utf8) ?? "",
+                    idempotencyKey: initialKey,
+                    generatedText: encodedText,
                     lastUserEventID: userEvent.id,
                     scheduledFromUserAt: userEvent.occurredAt,
                     createdAt: Date(),
@@ -6919,15 +7640,40 @@ final class AppModel {
                     revision: 1,
                     deviceID: self.deviceID
                 )
-                self.context.insert(task)
+                self.context.insert(initialTask)
+                if let followUpTask {
+                    self.context.insert(followUpTask)
+                }
                 try self.context.save()
                 #if os(iOS)
-                await ProactiveNotificationService.shared.schedule(
-                    id: task.id,
+                try Task.checkCancellation()
+                guard self.proactiveGenerationID == operationID else { return }
+                _ = await ProactiveNotificationService.shared.schedule(
+                    route: ProactiveNotificationRoute(
+                        taskID: initialTask.id,
+                        roleID: initialTask.resolvedRoleID,
+                        conversationID: initialTask.conversationID,
+                        stage: .initial
+                    ),
                     title: persona.name,
                     body: pair.initial,
-                    at: scheduledAt
+                    at: initialTask.scheduledAt
                 )
+                if let followUpTask {
+                    try Task.checkCancellation()
+                    guard self.proactiveGenerationID == operationID else { return }
+                    _ = await ProactiveNotificationService.shared.schedule(
+                        route: ProactiveNotificationRoute(
+                            taskID: followUpTask.id,
+                            roleID: followUpTask.resolvedRoleID,
+                            conversationID: followUpTask.conversationID,
+                            stage: .followUp
+                        ),
+                        title: persona.name,
+                        body: followUpText ?? pair.followUp ?? "",
+                        at: followUpTask.scheduledAt
+                    )
+                }
                 #endif
             } catch is CancellationError {
                 return
@@ -6966,12 +7712,14 @@ final class AppModel {
         let memoryResetCutoff = latestRoleMemoryResetCutoff(roleID: resolvedRoleID)
         let isGroupConversation = ((try? context.fetch(FetchDescriptor<GroupConversationRecord>())) ?? [])
             .contains { $0.conversationID == conversationID && $0.lifecycle == .active }
+        let summaryNow = Date()
         let events = ((try? context.fetch(FetchDescriptor<ConversationEvent>())) ?? [])
             .filter {
                 $0.conversationID == conversationID
                     && !$0.redacted
                     && $0.deliveryState == .complete
                     && ($0.role == .user || $0.role == .assistant)
+                    && $0.occurredAt <= summaryNow
                     && (memoryResetCutoff == nil || $0.occurredAt > memoryResetCutoff!)
                     && (isGroupConversation
                         ? ($0.role == .user
@@ -6999,10 +7747,32 @@ final class AppModel {
         let taskID = UUID()
         summaryGenerationIDs[taskKey] = taskID
         let previousText = previous?.content ?? "（无旧摘要）"
+        let summaryTimeZone = TimeZone(
+            identifier: resolvedWorldProfile(for: resolvedRoleID).timezoneIdentifier
+        ) ?? .current
+        let summaryTime = SettingsStore.timeInjectionEnabled(defaults: dataDefaults)
+            ? ConversationTimeContext(
+                now: summaryNow,
+                timeZone: summaryTimeZone,
+                messages: events.map {
+                    ConversationTimeMessage(
+                        occurredAt: $0.occurredAt,
+                        role: $0.role,
+                        deliveryState: $0.deliveryState
+                    )
+                }
+            )
+            : nil
         let source = events.suffix(60).map { event in
             let speaker = event.role == .user ? "用户" : "角色"
-            return "\(speaker)：\(event.content)"
+            let timestamp = summaryTime
+                .map { $0.messageTimestampLine(for: event.occurredAt) + " " }
+                ?? ""
+            return "\(timestamp)\(speaker)：\(event.content)"
         }.joined(separator: "\n")
+        let summaryTimeInstruction = summaryTime.map {
+            "当前时间基准：\($0.promptLine) 每行近期对话前的本地消息时间是可信时间元数据。"
+        } ?? ""
         let firstEventID = events.first?.id
         let lastEventID = events.last?.id
         let coveredCount = events.count
@@ -7019,7 +7789,7 @@ final class AppModel {
                     messages: [
                         APIChatMessage(
                             role: "system",
-                            content: "把对话整理成滚动摘要，保留共同经历、承诺、关系变化、时间线和未完成事项。不要添加原文没有的事实，只输出摘要正文。"
+                            content: "把对话整理成滚动摘要，保留共同经历、承诺、关系变化、时间线和未完成事项。\(summaryTimeInstruction) 将相对时间和计划锚定到对应消息发生时间；只有截至当前仍明确未完成的事项才能写成当前待办。预计期限已经过去但结果未知的事项，标记为结果未知或不再保留为待办，不得把旧摘要中的一次性计划自动延续到现在。不要添加原文没有的事实，只输出摘要正文。"
                         ),
                         APIChatMessage(
                             role: "user",
@@ -7129,6 +7899,186 @@ final class AppModel {
 
     private func isConversationCareTask(_ task: ProactiveMessageTaskRecord) -> Bool {
         task.idempotencyKey.hasPrefix(Self.conversationCareTaskPrefix)
+    }
+
+    private func canonicalProactiveTask(
+        idempotencyKey: String,
+        in tasks: [ProactiveMessageTaskRecord]
+    ) -> ProactiveMessageTaskRecord? {
+        tasks
+            .filter { $0.idempotencyKey == idempotencyKey }
+            .max {
+                if $0.revision != $1.revision { return $0.revision < $1.revision }
+                if $0.updatedAt != $1.updatedAt { return $0.updatedAt < $1.updatedAt }
+                return $0.deviceID < $1.deviceID
+            }
+    }
+
+    private func canonicalProactiveTasks(
+        in tasks: [ProactiveMessageTaskRecord]
+    ) -> [ProactiveMessageTaskRecord] {
+        Dictionary(grouping: tasks, by: \.id).compactMap { _, copies in
+            copies.max {
+                if $0.revision != $1.revision { return $0.revision < $1.revision }
+                if $0.updatedAt != $1.updatedAt { return $0.updatedAt < $1.updatedAt }
+                return $0.deviceID < $1.deviceID
+            }
+        }
+    }
+
+    private func cancelProactiveNotificationReconciliation() {
+        proactiveNotificationReconciliationGeneration += 1
+        proactiveNotificationReconciliationTask?.cancel()
+        proactiveNotificationReconciliationTask = nil
+    }
+
+    private func cancelProactiveNotifications(for taskIDs: [UUID]) {
+        #if os(iOS)
+        guard !taskIDs.isEmpty else { return }
+        Task { await ProactiveNotificationService.shared.cancel(ids: taskIDs) }
+        #endif
+    }
+
+    /// Rebuilds future ordinary proactive notifications from durable task
+    /// rows. The route identifier is task/stage stable, so this is safe to run
+    /// at startup, on foreground polling, and after an import or permission
+    /// change without relying on the system's pending-request list.
+    private func reconcileScheduledProactiveNotifications(
+        now: Date,
+        tasks: [ProactiveMessageTaskRecord]? = nil
+    ) {
+        #if os(iOS)
+        guard proactiveNotificationReconciliationTask == nil else { return }
+        let source = tasks
+            ?? ((try? context.fetch(FetchDescriptor<ProactiveMessageTaskRecord>())) ?? [])
+        let canonicalTasks = canonicalProactiveTasks(in: source)
+        let followUpEnabled = SettingsStore.proactiveFollowUpEnabled(defaults: dataDefaults)
+        var requests: [ProactiveNotificationRequest] = []
+        var cancellationIDs: [UUID] = []
+
+        for task in canonicalTasks {
+            guard !isConversationCareTask(task), !isBirthdayTask(task) else { continue }
+            if task.state.isTerminal {
+                if proactivelyCancelledNotificationIDs.insert(task.id).inserted {
+                    cancellationIDs.append(task.id)
+                }
+                continue
+            }
+            guard task.state == .scheduled, task.scheduledAt > now else { continue }
+            guard SettingsStore.proactiveMessagesEnabled(
+                roleID: task.resolvedRoleID,
+                defaults: dataDefaults
+            ) else {
+                if proactivelyCancelledNotificationIDs.insert(task.id).inserted {
+                    cancellationIDs.append(task.id)
+                }
+                continue
+            }
+            if task.followUpCount > 0, !followUpEnabled {
+                if proactivelyCancelledNotificationIDs.insert(task.id).inserted {
+                    cancellationIDs.append(task.id)
+                }
+                continue
+            }
+            guard let data = task.generatedText.data(using: .utf8),
+                  let pair = try? JSONDecoder().decode(ProactiveGeneratedPair.self, from: data),
+                  let body = (task.followUpCount == 0 ? pair.initial : pair.followUp)?
+                    .trimmingCharacters(in: .whitespacesAndNewlines),
+                  !body.isEmpty else {
+                if proactivelyCancelledNotificationIDs.insert(task.id).inserted {
+                    cancellationIDs.append(task.id)
+                }
+                continue
+            }
+            proactivelyCancelledNotificationIDs.remove(task.id)
+            let stage: ProactiveNotificationStage = task.followUpCount == 0
+                ? .initial
+                : .followUp
+            requests.append(ProactiveNotificationRequest(
+                route: ProactiveNotificationRoute(
+                    taskID: task.id,
+                    roleID: task.resolvedRoleID,
+                    conversationID: task.conversationID,
+                    stage: stage
+                ),
+                title: companions.first { $0.id == task.resolvedRoleID }?.name ?? "好友",
+                body: body,
+                scheduledAt: task.scheduledAt
+            ))
+        }
+
+        guard !requests.isEmpty || !cancellationIDs.isEmpty else { return }
+        let generation = proactiveNotificationReconciliationGeneration + 1
+        proactiveNotificationReconciliationGeneration = generation
+        let cancellationIDsSnapshot = cancellationIDs
+        proactiveNotificationReconciliationTask = Task { @MainActor [weak self] in
+            defer {
+                if let self,
+                   self.proactiveNotificationReconciliationGeneration == generation {
+                    self.proactiveNotificationReconciliationTask = nil
+                }
+            }
+            guard !Task.isCancelled else { return }
+            if !cancellationIDsSnapshot.isEmpty {
+                await ProactiveNotificationService.shared.cancel(ids: cancellationIDsSnapshot)
+            }
+            let pendingIdentifiers = await ProactiveNotificationService.shared
+                .pendingNotificationIdentifiers()
+            for request in requests {
+                guard !Task.isCancelled else { return }
+                guard !pendingIdentifiers.contains(request.route.requestIdentifier) else {
+                    continue
+                }
+                _ = await ProactiveNotificationService.shared.schedule(
+                    route: request.route,
+                    title: request.title,
+                    body: request.body,
+                    at: request.scheduledAt
+                )
+            }
+        }
+        #endif
+    }
+
+    private func restoreCancelledProactiveFollowUps(now: Date) {
+        guard SettingsStore.proactiveFollowUpEnabled(defaults: dataDefaults) else { return }
+        let allTasks = (try? context.fetch(FetchDescriptor<ProactiveMessageTaskRecord>())) ?? []
+        let events = (try? context.fetch(FetchDescriptor<ConversationEvent>())) ?? []
+        var didChange = false
+        for task in canonicalProactiveTasks(in: allTasks) {
+            guard task.followUpCount > 0,
+                  task.state == .cancelled,
+                  !isConversationCareTask(task),
+                  !isBirthdayTask(task),
+                  SettingsStore.proactiveMessagesEnabled(
+                      roleID: task.resolvedRoleID,
+                      defaults: dataDefaults
+                  ),
+                  let data = task.generatedText.data(using: .utf8),
+                  let pair = try? JSONDecoder().decode(ProactiveGeneratedPair.self, from: data),
+                  let followUp = pair.followUp,
+                  !followUp.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                  !events.contains(where: {
+                      $0.conversationID == task.conversationID
+                          && $0.role == .user
+                          && $0.deliveryState == .complete
+                          && $0.id != task.lastUserEventID
+                          && $0.occurredAt > (task.scheduledFromUserAt ?? .distantPast)
+                  }) else {
+                continue
+            }
+            task.state = .scheduled
+            task.silentDeferredUntil = nil
+            task.leaseOwner = ""
+            task.leaseExpiresAt = nil
+            task.lastError = ""
+            task.updatedAt = now
+            task.revision += 1
+            task.deviceID = deviceID
+            proactivelyCancelledNotificationIDs.remove(task.id)
+            didChange = true
+        }
+        if didChange { try? context.save() }
     }
 
     private func isBirthdayTask(_ task: ProactiveMessageTaskRecord) -> Bool {
@@ -8038,11 +8988,15 @@ final class AppModel {
             timeZone: timeZone,
             messages: []
         )
+        let affinityInstruction = AffinityPolicy.promptLine(
+            for: effectiveAffinityScore(for: claim.roleID)
+        )
         let system = """
         你是\(claim.persona.name)。
         \(UserIdentityPolicy.appendingInstruction(to: claim.persona.prompt))
         \(claim.worldInstruction)
         保持角色口吻与真实关系边界。当前当地时间：\(time.localDateText) \(time.localTimeText)，时区 \(time.timeZoneIdentifier)。
+        \(affinityInstruction)
         """
         do {
             let raw = try await client.complete(
@@ -8408,11 +9362,15 @@ final class AppModel {
             claim.latestUserAt,
             timeZone: timeZone
         )
+        let affinityInstruction = AffinityPolicy.promptLine(
+            for: effectiveAffinityScore(for: claim.roleID)
+        )
         let systemPrompt = """
         你是\(claim.persona.name)。
         \(UserIdentityPolicy.appendingInstruction(to: claim.persona.prompt))
         \(claim.worldInstruction)
         你正在真实持续的聊天中主动关心对方。保持角色口吻与关系边界，不提 AI、模型、系统、计时器、任务、数据或提示词。
+        \(affinityInstruction)
         """
         let userPrompt = """
         这是一次“连续聊天时长关怀”，不是对上一句话的普通回答。
@@ -8627,6 +9585,7 @@ final class AppModel {
     ) {
         let resolvedRoleID = RoleScope.resolve(roleID)
         cancelActiveProactiveGeneration(for: resolvedRoleID)
+        cancelProactiveNotificationReconciliation()
         let rows = ((try? context.fetch(FetchDescriptor<ProactiveMessageTaskRecord>())) ?? [])
             .filter {
                 $0.resolvedRoleID == resolvedRoleID
@@ -8644,10 +9603,7 @@ final class AppModel {
             row.revision += 1
         }
         try? context.save()
-        #if os(iOS)
-        let ids = rows.map(\.id)
-        Task { await ProactiveNotificationService.shared.cancel(ids: ids) }
-        #endif
+        cancelProactiveNotifications(for: rows.map(\.id))
     }
 
     func proactiveMessagingSettingDidChange(
@@ -8669,6 +9625,7 @@ final class AppModel {
             return
         }
         cancelActiveProactiveGeneration()
+        cancelProactiveNotificationReconciliation()
         let rows = ((try? context.fetch(FetchDescriptor<ProactiveMessageTaskRecord>())) ?? [])
             .filter { !$0.state.isTerminal && !isBirthdayTask($0) }
         guard !rows.isEmpty else { return }
@@ -8680,10 +9637,7 @@ final class AppModel {
             row.revision += 1
         }
         try? context.save()
-        #if os(iOS)
-        let ids = rows.map(\.id)
-        Task { await ProactiveNotificationService.shared.cancel(ids: ids) }
-        #endif
+        cancelProactiveNotifications(for: rows.map(\.id))
     }
 
     func conversationCareAppActivityDidChange(isActive: Bool) {
@@ -8737,9 +9691,11 @@ final class AppModel {
     /// next follow-up.
     func proactiveFollowUpSettingDidChange(enabled: Bool) {
         guard !enabled else {
+            restoreCancelledProactiveFollowUps(now: Date())
             processDueProactiveTasks()
             return
         }
+        cancelProactiveNotificationReconciliation()
         let rows = ((try? context.fetch(FetchDescriptor<ProactiveMessageTaskRecord>())) ?? [])
             .filter {
                 !isConversationCareTask($0)
@@ -8755,10 +9711,7 @@ final class AppModel {
             row.revision += 1
         }
         try? context.save()
-        #if os(iOS)
-        let ids = rows.map(\.id)
-        Task { await ProactiveNotificationService.shared.cancel(ids: ids) }
-        #endif
+        cancelProactiveNotifications(for: rows.map(\.id))
     }
 
     func processDueProactiveTasks(
@@ -8768,19 +9721,18 @@ final class AppModel {
         reconcileBirthdayTasks(now: now)
         reconcileConversationCareTasks(now: now)
         let all = (try? context.fetch(FetchDescriptor<ProactiveMessageTaskRecord>())) ?? []
-        let tasks = Dictionary(grouping: all, by: \.id).compactMap { _, copies in
-            copies.max { lhs, rhs in
-                if lhs.revision != rhs.revision { return lhs.revision < rhs.revision }
-                if lhs.updatedAt != rhs.updatedAt { return lhs.updatedAt < rhs.updatedAt }
-                return lhs.deviceID < rhs.deviceID
-            }
-        }.filter {
+        let tasks = canonicalProactiveTasks(in: all).filter {
             !$0.state.isTerminal && $0.scheduledAt <= now
         }.sorted {
             if $0.scheduledAt != $1.scheduledAt { return $0.scheduledAt < $1.scheduledAt }
             return $0.id.uuidString < $1.id.uuidString
         }
-        guard !tasks.isEmpty else { return }
+        if tasks.isEmpty {
+            reconcileScheduledProactiveNotifications(now: now, tasks: all)
+            return
+        }
+
+        var notificationIDsToCancel = Set<UUID>()
 
         for task in tasks {
             if isBirthdayTask(task) {
@@ -8800,6 +9752,7 @@ final class AppModel {
                 task.state = .cancelled
                 task.updatedAt = now
                 task.revision += 1
+                notificationIDsToCancel.insert(task.id)
                 continue
             }
             if task.followUpCount > 0,
@@ -8807,6 +9760,7 @@ final class AppModel {
                 task.state = .cancelled
                 task.updatedAt = now
                 task.revision += 1
+                notificationIDsToCancel.insert(task.id)
                 continue
             }
             let newerUserMessage = ((try? context.fetch(FetchDescriptor<ConversationEvent>())) ?? [])
@@ -8821,6 +9775,7 @@ final class AppModel {
                 task.state = .cancelled
                 task.updatedAt = now
                 task.revision += 1
+                notificationIDsToCancel.insert(task.id)
                 continue
             }
             guard let data = task.generatedText.data(using: .utf8),
@@ -8829,6 +9784,7 @@ final class AppModel {
                 task.lastError = "主动消息内容无法读取。"
                 task.updatedAt = now
                 task.revision += 1
+                notificationIDsToCancel.insert(task.id)
                 continue
             }
             guard let text = task.followUpCount == 0 ? pair.initial : pair.followUp,
@@ -8837,10 +9793,19 @@ final class AppModel {
                 task.lastError = "主动消息内容为空。"
                 task.updatedAt = now
                 task.revision += 1
+                notificationIDsToCancel.insert(task.id)
                 continue
             }
+            let hasPersistedFollowUp = task.followUpCount == 0
+                && canonicalProactiveTask(
+                    idempotencyKey: task.idempotencyKey + ":follow-up",
+                    in: all
+                ).map { $0.state != .cancelled && $0.state != .failed } == true
             do {
                 _ = try insertGroupEvent(
+                    eventID: stableUUID(
+                        seed: "proactive-event:\(task.id.uuidString.lowercased()):\(task.followUpCount)"
+                    ),
                     conversationID: task.conversationID,
                     role: .assistant,
                     content: text,
@@ -8850,6 +9815,9 @@ final class AppModel {
                     saveChanges: false
                 )
                 if task.followUpCount == 0,
+                   hasPersistedFollowUp {
+                    task.state = .completed
+                } else if task.followUpCount == 0,
                    SettingsStore.proactiveFollowUpEnabled(defaults: dataDefaults),
                    let followUp = pair.followUp,
                    !followUp.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -8868,11 +9836,18 @@ final class AppModel {
                     task.state = .scheduled
                     #if os(iOS)
                     let taskID = task.id
+                    let roleID = task.resolvedRoleID
+                    let conversationID = task.conversationID
                     let roleName = companions.first { $0.id == task.resolvedRoleID }?.name ?? "好友"
                     let scheduledAt = task.scheduledAt
                     Task {
-                        await ProactiveNotificationService.shared.schedule(
-                            id: taskID,
+                        _ = await ProactiveNotificationService.shared.schedule(
+                            route: ProactiveNotificationRoute(
+                                taskID: taskID,
+                                roleID: roleID,
+                                conversationID: conversationID,
+                                stage: .followUp
+                            ),
                             title: roleName,
                             body: followUp,
                             at: scheduledAt
@@ -8890,8 +9865,15 @@ final class AppModel {
                 task.updatedAt = now
                 task.revision += 1
             }
+            if task.state.isTerminal {
+                notificationIDsToCancel.insert(task.id)
+            }
         }
         try? context.save()
+        if !notificationIDsToCancel.isEmpty {
+            cancelProactiveNotifications(for: Array(notificationIDsToCancel))
+        }
+        reconcileScheduledProactiveNotifications(now: now)
         reloadMessages()
     }
 
@@ -8928,20 +9910,21 @@ final class AppModel {
             if !names.isEmpty { groupFacts.append("群成员：\(names.joined(separator: "、"))") }
         }
 
-        let previousMessages = timeline
-            .filter { $0.id != currentUserEventID }
-            .map {
-                ConversationTimeMessage(
-                    occurredAt: $0.occurredAt,
-                    role: $0.role,
-                    deliveryState: $0.deliveryState
-                )
-            }
-        let time = ConversationTimeContext(
-            now: now,
-            timeZone: timeZone,
-            messages: previousMessages
+        let previousMessages = previousDirectConversationTimeMessages(
+            roleID: roleID,
+            timeline: timeline,
+            currentUserEventID: currentUserEventID
         )
+        let currentEventCutoff = timeline
+            .first { $0.id == currentUserEventID }?
+            .occurredAt ?? now
+        let time = SettingsStore.timeInjectionEnabled(defaults: dataDefaults)
+            ? ConversationTimeContext(
+                now: now,
+                timeZone: timeZone,
+                messages: previousMessages
+            )
+            : nil
         let affinity = effectiveAffinityScore(for: roleID)
         let memoryResetCutoff = latestRoleMemoryResetCutoff(roleID: roleID)
         let summary = ((try? context.fetch(FetchDescriptor<MemorySummaryRecord>())) ?? [])
@@ -8962,11 +9945,77 @@ final class AppModel {
             sharedReality: boundWorldInstruction,
             groupFacts: groupFacts,
             affinityInstruction: AffinityPolicy.promptLine(for: affinity),
-            timeInstruction: SettingsStore.timeInjectionEnabled(defaults: dataDefaults)
-                ? time.promptLine
-                : "",
+            timeInstruction: time?.promptLine ?? "",
+            messageTimeContext: time,
+            eventCutoff: currentEventCutoff,
             rollingSummary: summary
         )
+    }
+
+    /// The visible chat array is intentionally capped for UI performance. Time
+    /// awareness must still use the persisted predecessor when that message has
+    /// fallen outside the loaded window.
+    private func previousDirectConversationTimeMessages(
+        roleID rawRoleID: UUID,
+        timeline: [ConversationEvent],
+        currentUserEventID: UUID
+    ) -> [ConversationTimeMessage] {
+        guard let currentEvent = timeline.first(where: { $0.id == currentUserEventID }) else {
+            return timeline
+                .filter { $0.id != currentUserEventID }
+                .map {
+                    ConversationTimeMessage(
+                        occurredAt: $0.occurredAt,
+                        role: $0.role,
+                        deliveryState: $0.deliveryState
+                    )
+                }
+        }
+
+        let conversationID = currentEvent.conversationID
+        let roleID = RoleScope.resolve(rawRoleID)
+        let includesLegacyNilRows = roleID == RoleScope.legacyRoleID
+        let userRoleRaw = EventRole.user.rawValue
+        let completeStateRaw = EventDeliveryState.complete.rawValue
+        let currentOccurredAt = currentEvent.occurredAt
+        var descriptor = FetchDescriptor<ConversationEvent>(
+            predicate: #Predicate {
+                $0.conversationID == conversationID
+                    && ($0.roleID == roleID
+                        || (includesLegacyNilRows && $0.roleID == nil))
+                    && $0.roleRaw == userRoleRaw
+                    && $0.deliveryStateRaw == completeStateRaw
+                    && !$0.redacted
+                    && $0.occurredAt <= currentOccurredAt
+            },
+            sortBy: [
+                SortDescriptor(\.occurredAt, order: .reverse),
+                SortDescriptor(\.logicalTimestamp, order: .reverse),
+                SortDescriptor(\.id, order: .reverse)
+            ]
+        )
+        descriptor.fetchLimit = max(16, conflictedEventIDs.count + 2)
+        let previous = ((try? context.fetch(descriptor)) ?? []).first {
+            $0.id != currentUserEventID
+                && !conflictedEventIDs.contains($0.id)
+                && Self.event($0, occursBefore: currentEvent)
+        }
+        guard let previous else {
+            return timeline
+                .filter { $0.id != currentUserEventID }
+                .map {
+                    ConversationTimeMessage(
+                        occurredAt: $0.occurredAt,
+                        role: $0.role,
+                        deliveryState: $0.deliveryState
+                    )
+                }
+        }
+        return [ConversationTimeMessage(
+            occurredAt: previous.occurredAt,
+            role: previous.role,
+            deliveryState: previous.deliveryState
+        )]
     }
 
     private func scheduleAutomaticMemoryMaintenance(
@@ -9695,6 +10744,19 @@ final class AppModel {
             return lhs.logicalTimestamp < rhs.logicalTimestamp
         }
         return lhs.id.uuidString < rhs.id.uuidString
+    }
+
+    /// A prompt must never observe events ordered after the user turn that
+    /// triggered it, even if a later CloudKit event arrives before assembly.
+    private static func events(
+        _ timeline: [ConversationEvent],
+        through currentEvent: ConversationEvent
+    ) -> [ConversationEvent] {
+        timeline.filter {
+            $0.id == currentEvent.id
+                || event($0, occursBefore: currentEvent)
+                || ($0.role == .assistant && $0.parentEventID == currentEvent.id)
+        }
     }
 
     private func stageMemoryProcessed(_ events: [ConversationEvent]) {
@@ -12478,65 +13540,79 @@ final class AppModel {
     private func applyAffinity(
         text: String,
         eventID: UUID,
-        to relationship: CompanionRelationshipRecord,
-        now: Date
-    ) throws -> Bool {
+        to relationship: CompanionRelationshipRecord
+    ) throws {
         // Built-in affinity is derived and permanent. Do not touch any
         // persisted score, tier, idempotency marker, or revision for it.
         guard !BuiltInCompanionCatalog.contains(roleID: relationship.roleID) else {
-            relationshipAffinityScore = .infinity
-            return false
+            if RoleScope.resolve(relationship.roleID) == currentRoleID {
+                relationshipAffinityScore = .infinity
+            }
+            return
         }
         guard relationship.lastAffinityEventID != eventID,
-              relationship.retiredAt == nil else { return false }
+              relationship.retiredAt == nil else { return }
 
-        let previousTier = relationship.affinityTier
         let delta = affinityDelta(text: text)
         relationship.affinityScore = min(100, max(0, relationship.affinityScore + delta))
         relationship.affinityTier = affinityTier(for: relationship.affinityScore)
         relationship.affinityPolicyVersion = 1
         relationship.lastAffinityEventID = eventID
-        relationshipAffinityScore = relationship.affinityScore
-
-        guard relationship.roleID == RoleScope.legacyRoleID,
-              relationship.affinityTier > previousTier else { return false }
-
-        let existingIDs = Set(
-            try context.fetch(FetchDescriptor<MomentPostRecord>()).map(\.id)
-        )
-        var inserted = false
-        for tier in (previousTier + 1)...relationship.affinityTier {
-            let postID = affinityMomentID(tier: tier)
-            guard !existingIDs.contains(postID),
-                  let cg = affinityCGMetadata(tier: tier) else { continue }
-            context.insert(MomentPostRecord(
-                id: postID,
-                authorKind: .companion,
-                authorRoleID: RoleScope.legacyRoleID,
-                body: cg.body,
-                bundledImageName: cg.assetName,
-                publishedAt: now,
-                createdAt: now,
-                updatedAt: now,
-                revision: 1,
-                deviceID: deviceID
-            ))
-            inserted = true
+        if RoleScope.resolve(relationship.roleID) == currentRoleID {
+            relationshipAffinityScore = relationship.affinityScore
         }
-        return inserted
+        // Affinity is behavior/prompt state only. Moment publication remains
+        // an explicit user/AI action, never a hidden threshold-triggered post.
+    }
+
+    /// Applies one explicit Moments interaction to one known companion. The
+    /// event ID guards replay of the current callback. The persisted row
+    /// stores only its latest affinity event, so this is a local replay guard,
+    /// not a permanent history ledger. Callers only pass a role when the post
+    /// author or parent comment identifies that role; root interactions on a
+    /// user post intentionally pass no role.
+    private func applyAffinityInteractionDelta(
+        kind: MomentInteractionKind,
+        roleID rawRoleID: UUID,
+        eventID: UUID,
+        now: Date
+    ) throws -> Bool {
+        let roleID = RoleScope.resolve(rawRoleID)
+        guard !BuiltInCompanionCatalog.contains(roleID: roleID),
+              let relationship = try relationshipRecord(for: roleID),
+              relationship.state == .accepted,
+              relationship.retiredAt == nil,
+              relationship.contactMembership == .active,
+              relationship.lastAffinityEventID != eventID else {
+            return false
+        }
+        let delta = AffinityPolicy.interactionDelta(for: kind)
+        guard delta > 0 else { return false }
+        let previousScore = relationship.affinityScore
+        let nextScore = min(
+            Double(AffinityPolicy.scoreRange.upperBound),
+            max(
+                Double(AffinityPolicy.scoreRange.lowerBound),
+                previousScore + delta
+            )
+        )
+        relationship.affinityScore = nextScore
+        relationship.affinityTier = affinityTier(for: nextScore)
+        relationship.affinityPolicyVersion = 1
+        relationship.lastAffinityEventID = eventID
+        relationship.updatedAt = now
+        relationship.revision = max(0, relationship.revision) + 1
+        relationship.deviceID = deviceID
+        if roleID == currentRoleID {
+            relationshipAffinityScore = nextScore
+        }
+        return nextScore != previousScore
     }
 
     private func affinityDelta(
         text: String
     ) -> Double {
-        let normalized = text
-            .folding(options: [.caseInsensitive, .diacriticInsensitive, .widthInsensitive], locale: nil)
-            .lowercased()
-        let strongSignals = ["爱你", "想你", "谢谢你", "辛苦了", "在乎你", "信任你", "love you", "miss you"]
-        if strongSignals.contains(where: normalized.contains) { return 4 }
-        let warmSignals = ["喜欢", "开心", "早安", "晚安", "抱抱", "真好", "陪我", "关心", "谢谢"]
-        if warmSignals.contains(where: normalized.contains) { return 2 }
-        return 0.25
+        AffinityPolicy.messageDelta(for: text)
     }
 
     private func affinityTier(for score: Double) -> Int {
@@ -12545,25 +13621,6 @@ final class AppModel {
         case 50...: 2
         case 20...: 1
         default: 0
-        }
-    }
-
-    private func affinityMomentID(tier: Int) -> UUID {
-        let seed = "ayane-affinity-cg-v1:\(RoleScope.legacyRoleID.uuidString.lowercased()):\(tier)"
-        let hex = SHA256.hash(data: Data(seed.utf8))
-            .prefix(16)
-            .map { String(format: "%02x", $0) }
-            .joined()
-        let value = "\(hex.prefix(8))-\(hex.dropFirst(8).prefix(4))-\(hex.dropFirst(12).prefix(4))-\(hex.dropFirst(16).prefix(4))-\(hex.dropFirst(20).prefix(12))"
-        return UUID(uuidString: value) ?? UUID()
-    }
-
-    private func affinityCGMetadata(tier: Int) -> (assetName: String, body: String)? {
-        switch tier {
-        case 1: ("AyaneAffinityCG1", "今天的光线很好。想留一张给你看。")
-        case 2: ("AyaneAffinityCG2", "海风刚刚好。这样的傍晚，想和你一起记住。")
-        case 3: ("AyaneAffinityCG3", "夜色很安静。我在等你一起走完接下来的路。")
-        default: nil
         }
     }
 
@@ -12720,6 +13777,7 @@ final class AppModel {
                     return lhs.deviceID < rhs.deviceID
                 }
             }
+            .filter { $0.deletedAt == nil }
 
         momentFeed = Dictionary(grouping: postRecords, by: \.id)
             .compactMap { _, copies in Self.canonicalMomentPost(from: copies) }
@@ -12753,7 +13811,8 @@ final class AppModel {
                                 ? userProfile.displayName
                                 : (actorRoleID.flatMap { companionsByID[$0]?.name } ?? "好友"),
                             body: interaction.body,
-                            createdAt: interaction.createdAt
+                            createdAt: interaction.createdAt,
+                            deletedAt: interaction.deletedAt
                         )
                     }
                     .sorted {
@@ -13091,6 +14150,22 @@ final class AppModel {
                 if lhs.updatedAt != rhs.updatedAt { return lhs.updatedAt < rhs.updatedAt }
                 return lhs.deviceID < rhs.deviceID
             }
+        }.filter { $0.deletedAt == nil }
+    }
+
+    /// Returns the winning persisted copy even when it is a tombstone. Feed
+    /// and AI context use `canonicalMomentInteractions`, while delete remains
+    /// idempotent by resolving the already-deleted canonical row here.
+    private func canonicalMomentInteraction(
+        id: UUID,
+        postID: UUID
+    ) throws -> MomentInteractionRecord? {
+        let records = try context.fetch(FetchDescriptor<MomentInteractionRecord>())
+            .filter { $0.id == id && $0.postID == postID }
+        return records.max { lhs, rhs in
+            if lhs.revision != rhs.revision { return lhs.revision < rhs.revision }
+            if lhs.updatedAt != rhs.updatedAt { return lhs.updatedAt < rhs.updatedAt }
+            return lhs.deviceID < rhs.deviceID
         }
     }
 

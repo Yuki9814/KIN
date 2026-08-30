@@ -26,6 +26,12 @@ struct AIConnectionsView: View {
     @State private var pageMessageIsError = false
     @State private var imageAPIKey = ""
     @State private var loadedImageAPIKey = ""
+    @State private var imageBaseURL = ""
+    @State private var loadedImageBaseURL = ""
+    @State private var imageModel = ""
+    @State private var loadedImageModel = ""
+    @State private var imageAPIStyle = ImageGenerationAPIStyle.imagesAPI
+    @State private var loadedImageAPIStyle = ImageGenerationAPIStyle.imagesAPI
     @State private var imageAPIKeyStatus: String?
     @State private var showDeleteImageAPIKeyConfirmation = false
 
@@ -52,6 +58,39 @@ struct AIConnectionsView: View {
             }
 
             Section {
+                Picker("请求方式", selection: $imageAPIStyle) {
+                    ForEach(ImageGenerationAPIStyle.allCases) { style in
+                        Text(style.title).tag(style)
+                    }
+                }
+                #if os(macOS)
+                .pickerStyle(.menu)
+                #endif
+                .accessibilityIdentifier("aiConnections.imageAPIStyle")
+                .onChange(of: imageAPIStyle) { _, _ in
+                    updateImageAPIKeyStatus()
+                }
+
+                TextField("API 根地址或完整 endpoint", text: $imageBaseURL)
+                    .autocorrectionDisabled()
+                    #if os(iOS)
+                    .textInputAutocapitalization(.never)
+                    #endif
+                    .accessibilityIdentifier("aiConnections.imageBaseURL")
+                    .onChange(of: imageBaseURL) { _, _ in
+                        updateImageAPIKeyStatus()
+                    }
+
+                TextField("图片模型 ID", text: $imageModel)
+                    .autocorrectionDisabled()
+                    #if os(iOS)
+                    .textInputAutocapitalization(.never)
+                    #endif
+                    .accessibilityIdentifier("aiConnections.imageModel")
+                    .onChange(of: imageModel) { _, _ in
+                        updateImageAPIKeyStatus()
+                    }
+
                 SecureField("图片生成 API Key", text: $imageAPIKey)
                     .autocorrectionDisabled()
                     #if os(iOS)
@@ -64,14 +103,11 @@ struct AIConnectionsView: View {
                     }
 
                 HStack(spacing: 10) {
-                    Button("保存 API Key") {
-                        saveImageAPIKey()
+                    Button("保存生图配置") {
+                        saveImageConfiguration()
                     }
                     .buttonStyle(.borderedProminent)
-                    .disabled(
-                        imageAPIKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                            || !imageAPIKeyIsDirty
-                    )
+                    .disabled(!imageConfigurationCanSave)
                     .accessibilityIdentifier("aiConnections.imageAPIKey.save")
 
                     if !loadedImageAPIKey.isEmpty {
@@ -93,7 +129,7 @@ struct AIConnectionsView: View {
             } header: {
                 Text("图片生成 API")
             } footer: {
-                Text("这里只预留并保存图片生成 API Key，不会发起生图请求、测试连接、打开外部应用或要求导回图片。密钥仅保存在本机钥匙串。")
+                Text("\(imageAPIStyle.detail)。在单聊的“更多－生成图片”中输入提示词后，KIN 会真实调用该接口，并把返回图片保存为本地聊天消息。密钥仅保存在本机钥匙串。")
             }
 
             Section {
@@ -192,14 +228,31 @@ struct AIConnectionsView: View {
 
     private var imageAPIKeyIsDirty: Bool {
         imageAPIKey != loadedImageAPIKey
+            || imageBaseURL != loadedImageBaseURL
+            || imageModel != loadedImageModel
+            || imageAPIStyle != loadedImageAPIStyle
+    }
+
+    private var imageConfigurationCanSave: Bool {
+        imageAPIKeyIsDirty
+            && !imageAPIKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && !imageBaseURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && !imageModel.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     private func loadImageAPIKey() {
         do {
+            let configuration = SettingsStore.imageGenerationConfiguration()
             let value = try SettingsStore.imageGenerationAPIKey() ?? ""
+            loadedImageBaseURL = configuration.baseURL
+            imageBaseURL = configuration.baseURL
+            loadedImageModel = configuration.model
+            imageModel = configuration.model
+            loadedImageAPIStyle = configuration.apiStyle
+            imageAPIStyle = configuration.apiStyle
             loadedImageAPIKey = value
             imageAPIKey = value
-            imageAPIKeyStatus = value.isEmpty ? "尚未填写" : "已安全保存"
+            imageAPIKeyStatus = value.isEmpty ? "尚未填写 Key" : "配置已保存"
         } catch {
             imageAPIKeyStatus = error.localizedDescription
         }
@@ -209,17 +262,31 @@ struct AIConnectionsView: View {
         if imageAPIKeyIsDirty {
             imageAPIKeyStatus = "有未保存更改"
         } else {
-            imageAPIKeyStatus = loadedImageAPIKey.isEmpty ? "尚未填写" : "已安全保存"
+            imageAPIKeyStatus = loadedImageAPIKey.isEmpty ? "尚未填写 Key" : "配置已保存"
         }
     }
 
-    private func saveImageAPIKey() {
+    private func saveImageConfiguration() {
         do {
             let trimmed = imageAPIKey.trimmingCharacters(in: .whitespacesAndNewlines)
+            let configuration = ImageGenerationConfiguration(
+                baseURL: imageBaseURL,
+                model: imageModel,
+                apiStyle: imageAPIStyle
+            )
+            _ = try OpenAICompatibleImageGenerationClient.endpoint(for: configuration)
             try SettingsStore.saveImageGenerationAPIKey(trimmed)
+            SettingsStore.saveImageGenerationConfiguration(configuration)
+            let savedConfiguration = SettingsStore.imageGenerationConfiguration()
             imageAPIKey = trimmed
             loadedImageAPIKey = trimmed
-            imageAPIKeyStatus = "已安全保存"
+            imageBaseURL = savedConfiguration.baseURL
+            loadedImageBaseURL = savedConfiguration.baseURL
+            imageModel = savedConfiguration.model
+            loadedImageModel = savedConfiguration.model
+            imageAPIStyle = savedConfiguration.apiStyle
+            loadedImageAPIStyle = savedConfiguration.apiStyle
+            imageAPIKeyStatus = "配置已保存，接口将在实际生成时验证"
         } catch {
             imageAPIKeyStatus = error.localizedDescription
         }

@@ -639,6 +639,10 @@ struct MomentInteractionSummary: Identifiable, Equatable, Hashable, Sendable {
     let actorName: String
     let body: String
     let createdAt: Date
+    /// Mirrors the persisted interaction tombstone so feed consumers can
+    /// filter at the domain boundary instead of hiding a deleted row only in
+    /// a view.
+    let deletedAt: Date?
 
     init(
         id: UUID,
@@ -650,7 +654,8 @@ struct MomentInteractionSummary: Identifiable, Equatable, Hashable, Sendable {
         actorRoleID: UUID?,
         actorName: String,
         body: String,
-        createdAt: Date
+        createdAt: Date,
+        deletedAt: Date? = nil
     ) {
         self.id = id
         self.postID = postID
@@ -662,6 +667,7 @@ struct MomentInteractionSummary: Identifiable, Equatable, Hashable, Sendable {
         self.actorName = actorName
         self.body = body
         self.createdAt = createdAt
+        self.deletedAt = deletedAt
     }
 }
 
@@ -680,11 +686,11 @@ struct MomentPostSummary: Identifiable, Equatable, Hashable, Sendable {
     var isUserAuthored: Bool { authorKind == .user }
 
     var likes: [MomentInteractionSummary] {
-        interactions.filter { $0.kind == .like }
+        interactions.filter { $0.deletedAt == nil && $0.kind == .like }
     }
 
     var comments: [MomentInteractionSummary] {
-        interactions.filter { $0.kind == .comment }
+        interactions.filter { $0.deletedAt == nil && $0.kind == .comment }
     }
 
     var userDidLike: Bool {

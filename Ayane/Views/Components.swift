@@ -143,6 +143,7 @@ struct MessageBubble: View {
     var companionName: String = "绫音"
     var companionAvatarImageData: Data? = nil
     var companionAvatarAction: (() -> Void)? = nil
+    var companionAvatarPokeAction: (() -> Void)? = nil
     /// Presentation-only user profile values. The source ConversationEvent remains
     /// the sole input for message text and delivery state.
     var userName: String = "我"
@@ -183,6 +184,12 @@ struct MessageBubble: View {
         // assistant text is drawn as several short, sequential bubbles.
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(accessibilityText)
+        .modifier(
+            MessagePokeAccessibilityAction(
+                companionName: companionName,
+                action: companionAvatarPokeAction
+            )
+        )
         .quickLookPreview($quickLookURL)
         .onChange(of: quickLookURL) { oldURL, newURL in
             guard newURL == nil, let oldURL else { return }
@@ -458,7 +465,38 @@ struct MessageBubble: View {
 
     @ViewBuilder
     private var companionAvatar: some View {
-        if let companionAvatarAction {
+        if let companionAvatarPokeAction {
+            CompanionAvatar(
+                size: avatarSize,
+                name: companionName,
+                imageData: companionAvatarImageData
+            )
+            .contentShape(Rectangle())
+            .gesture(
+                TapGesture(count: 2)
+                    .exclusively(before: TapGesture(count: 1))
+                    .onEnded { result in
+                        switch result {
+                        case .first:
+                            companionAvatarPokeAction()
+                        case .second:
+                            companionAvatarAction?()
+                        }
+                    }
+            )
+            .accessibilityAddTraits(.isButton)
+            .accessibilityLabel("查看\(companionName)的详细资料，双击可拍一拍")
+            .accessibilityAction {
+                companionAvatarAction?()
+            }
+            .accessibilityAction(named: Text("拍一拍\(companionName)")) {
+                companionAvatarPokeAction()
+            }
+            .accessibilityIdentifier("wechat.message.avatar.companion")
+            #if os(macOS)
+            .help("单击查看资料，双击拍一拍")
+            #endif
+        } else if let companionAvatarAction {
             Button(action: companionAvatarAction) {
                 CompanionAvatar(
                     size: avatarSize,
@@ -693,6 +731,22 @@ private struct WeChatBubbleTail: Shape {
         }
         path.closeSubpath()
         return path
+    }
+}
+
+private struct MessagePokeAccessibilityAction: ViewModifier {
+    let companionName: String
+    let action: (() -> Void)?
+
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        if let action {
+            content.accessibilityAction(named: Text("拍一拍\(companionName)")) {
+                action()
+            }
+        } else {
+            content
+        }
     }
 }
 

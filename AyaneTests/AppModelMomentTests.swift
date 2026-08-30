@@ -39,6 +39,101 @@ final class AppModelMomentTests: XCTestCase {
         XCTAssertEqual(try context.fetchCount(FetchDescriptor<MomentPostRecord>()), 1)
         XCTAssertEqual(fixture.appModel.momentFeed.first?.authorKind, .companion)
         XCTAssertEqual(fixture.appModel.momentFeed.first?.body, "今天吹到的风很温柔。")
+        XCTAssertTrue(
+            fixture.appModel.messages.contains { $0.content.contains("已创建朋友圈任务") },
+            "chat command must persist the scheduling receipt"
+        )
+        XCTAssertTrue(
+            fixture.appModel.messages.contains { $0.content.contains("已实际发布朋友圈") },
+            "published task must persist a separate completion receipt"
+        )
+    }
+
+    func testUserMomentCommentDeletionIsOwnedSoftDeleteAndCancelsReplies() throws {
+        let fixture = try makeFixture()
+        defer { fixture.defaults.removePersistentDomain(forName: fixture.suiteName) }
+
+        let context = ModelContext(fixture.bootstrap.container)
+        let now = Date()
+        let postID = UUID()
+        let commentID = UUID()
+        let aiCommentID = UUID()
+        let post = MomentPostRecord(
+            id: postID,
+            authorKind: .user,
+            body: "用户的朋友圈",
+            publishedAt: now,
+            createdAt: now,
+            updatedAt: now,
+            revision: 1,
+            deviceID: "fixture"
+        )
+        let userComment = MomentInteractionRecord(
+            id: commentID,
+            postID: postID,
+            kind: .comment,
+            actorKind: .user,
+            body: "我的评论",
+            createdAt: now,
+            updatedAt: now,
+            revision: 1,
+            deviceID: "fixture"
+        )
+        let aiComment = MomentInteractionRecord(
+            id: aiCommentID,
+            postID: postID,
+            kind: .comment,
+            actorKind: .companion,
+            actorRoleID: fixture.appModel.currentRoleID,
+            body: "AI 的评论",
+            createdAt: now,
+            updatedAt: now,
+            revision: 1,
+            deviceID: "fixture"
+        )
+        let replyTask = MomentAIInteractionTaskRecord(
+            postID: postID,
+            targetInteractionID: commentID,
+            parentInteractionID: commentID,
+            rootInteractionID: commentID,
+            roleID: fixture.appModel.currentRoleID,
+            state: .pending,
+            idempotencyKey: "delete-comment-test",
+            createdAt: now,
+            updatedAt: now,
+            revision: 1,
+            deviceID: "fixture"
+        )
+        context.insert(post)
+        context.insert(userComment)
+        context.insert(aiComment)
+        context.insert(replyTask)
+        try context.save()
+        fixture.appModel.refreshFromStore(force: true)
+
+        try fixture.appModel.deleteUserMomentComment(id: commentID, postID: postID)
+
+        let verification = ModelContext(fixture.bootstrap.container)
+        let storedComment = try XCTUnwrap(
+            try verification.fetch(FetchDescriptor<MomentInteractionRecord>())
+                .first { $0.id == commentID }
+        )
+        XCTAssertNotNil(storedComment.deletedAt)
+        XCTAssertGreaterThan(storedComment.revision, 1)
+        XCTAssertEqual(
+            try verification.fetch(FetchDescriptor<MomentAIInteractionTaskRecord>())
+                .first { $0.id == replyTask.id }?.state,
+            .cancelled
+        )
+        XCTAssertFalse(
+            fixture.appModel.momentFeed
+                .flatMap(\.interactions)
+                .contains { $0.id == commentID }
+        )
+        XCTAssertThrowsError(
+            try fixture.appModel.deleteUserMomentComment(id: aiCommentID, postID: postID)
+        )
+        try fixture.appModel.deleteUserMomentComment(id: commentID, postID: postID)
     }
 
     func testFutureChatCommandPersistsWithoutConfiguredAIConnection() throws {

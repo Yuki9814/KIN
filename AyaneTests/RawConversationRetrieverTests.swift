@@ -127,6 +127,48 @@ final class RawConversationRetrieverTests: XCTestCase {
         XCTAssertEqual(excerpts.map(\.eventID), [valid.id.uuidString])
     }
 
+    func testRetrieveRejectsSameTimeEventOrderedAfterCurrentTurn() {
+        let conversationID = UUID()
+        let sharedTime = date(1_000)
+        let earlier = makeEvent(
+            conversationID: conversationID,
+            role: .user,
+            content: "同一时刻但逻辑顺序较早",
+            hash: "earlier",
+            occurredAt: sharedTime,
+            logicalTimestamp: "099-before"
+        )
+        let current = makeEvent(
+            conversationID: conversationID,
+            role: .user,
+            content: "当前问题",
+            hash: "current",
+            occurredAt: sharedTime,
+            logicalTimestamp: "100-current"
+        )
+        let later = makeEvent(
+            conversationID: conversationID,
+            role: .assistant,
+            content: "同一时刻但逻辑顺序更晚",
+            hash: "later",
+            occurredAt: sharedTime,
+            logicalTimestamp: "101-after"
+        )
+
+        let excerpts = RawConversationRetriever.retrieve(
+            candidates: [
+                .init(eventID: earlier.id, score: 0.8),
+                .init(eventID: later.id, score: 1.0)
+            ],
+            events: [later, earlier],
+            currentEvent: current,
+            currentConversationID: conversationID
+        )
+
+        XCTAssertEqual(excerpts.map(\.eventID), [earlier.id.uuidString])
+        XCTAssertFalse(excerpts.contains { $0.eventID == later.id.uuidString })
+    }
+
     func testAssistantPenaltyAndStableScoreThenTimeOrdering() {
         let conversationID = UUID()
         let current = makeEvent(
@@ -320,6 +362,7 @@ final class RawConversationRetrieverTests: XCTestCase {
         content: String,
         hash: String,
         occurredAt: Date = Date(timeIntervalSince1970: 1_000),
+        logicalTimestamp: String? = nil,
         deliveryState: EventDeliveryState = .complete
     ) -> ConversationEvent {
         ConversationEvent(
@@ -327,7 +370,7 @@ final class RawConversationRetrieverTests: XCTestCase {
             conversationID: conversationID,
             deviceID: "test",
             deviceSequence: 1,
-            logicalTimestamp: "(occurredAt.timeIntervalSince1970)",
+            logicalTimestamp: logicalTimestamp ?? "\(occurredAt.timeIntervalSince1970)",
             occurredAt: occurredAt,
             role: role,
             content: content,
