@@ -85,6 +85,23 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Stage clean Apple source
+        id: stage_apple_source
+        shell: bash
+        run: |
+          set -euo pipefail
+          apple_root="$(mktemp -d /tmp/kin-apple-release.XXXXXX)"
+          source="$apple_root/source"
+          release="$apple_root/assets"
+          mkdir -p "$source" "$release"
+          git archive --format=tar "$GITHUB_SHA" | tar -x -C "$source"
+          {
+            echo "KIN_APPLE_ROOT=$apple_root"
+            echo "KIN_APPLE_SOURCE=$source"
+            echo "KIN_APPLE_RELEASE=$release"
+          } >> "$GITHUB_ENV"
+          echo "release_path=$release" >> "$GITHUB_OUTPUT"
+
       - name: Select Xcode 26.6
         shell: bash
         run: |
@@ -108,7 +125,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          release="$RUNNER_TEMP/kin-apple-release"
+          cd "$KIN_APPLE_SOURCE"
+          release="$KIN_APPLE_RELEASE"
           mkdir -p "$release"
           common_settings=(
             CODE_SIGNING_ALLOWED=NO
@@ -126,7 +144,7 @@ jobs:
             KIN_SOURCE_REVISION=public-release
           )
 
-          mac_derived="$RUNNER_TEMP/kin-macos-release"
+          mac_derived="$KIN_APPLE_ROOT/macos-derived"
           xcodebuild -project Ayane.xcodeproj -scheme AyaneMac -configuration Release \
             -destination "platform=macOS,arch=arm64" -derivedDataPath "$mac_derived" build \
             "${common_settings[@]}"
@@ -139,13 +157,13 @@ jobs:
           [ -f "$mac_app/Contents/Info.plist" ] || { echo "::error::macOS Info.plist is missing"; exit 1; }
           plutil -replace CFBundleIdentifier -string com.example.kin.macos "$mac_app/Contents/Info.plist"
           scripts/kin-release-asset-gate.sh --app-only "$mac_app" --expected-bundle-id com.example.kin.macos
-          dmg_root="$RUNNER_TEMP/kin-dmg-root"
+          dmg_root="$KIN_APPLE_ROOT/dmg-root"
           mkdir -p "$dmg_root"
           cp -R "$mac_app" "$dmg_root/KIN.app"
           hdiutil create -quiet -volname KIN -srcfolder "$dmg_root" -ov -format UDZO "$release/KIN-macos.dmg"
           scripts/kin-release-asset-gate.sh --dmg-only "$release/KIN-macos.dmg" --expected-bundle-id com.example.kin.macos
 
-          ios_derived="$RUNNER_TEMP/kin-ios-device-release"
+          ios_derived="$KIN_APPLE_ROOT/ios-device-derived"
           xcodebuild -project Ayane.xcodeproj -scheme AyaneiOS -configuration Release -sdk iphoneos \
             -destination "generic/platform=iOS" -derivedDataPath "$ios_derived" build \
             "${common_settings[@]}"
@@ -157,12 +175,12 @@ jobs:
           ios_app="${ios_apps[0]}"
           [ -f "$ios_app/Info.plist" ] || { echo "::error::iOS Info.plist is missing"; exit 1; }
           plutil -replace CFBundleIdentifier -string com.example.kin.ios "$ios_app/Info.plist"
-          ipa_root="$RUNNER_TEMP/kin-ipa-root"
+          ipa_root="$KIN_APPLE_ROOT/ipa-root"
           mkdir -p "$ipa_root/Payload"
           cp -R "$ios_app" "$ipa_root/Payload/KIN.app"
           (cd "$ipa_root" && /usr/bin/zip -qry "$release/KIN-ios-unsigned.ipa" Payload)
 
-          sim_derived="$RUNNER_TEMP/kin-ios-simulator-release"
+          sim_derived="$KIN_APPLE_ROOT/ios-simulator-derived"
           xcodebuild -project Ayane.xcodeproj -scheme AyaneiOS -configuration Release -sdk iphonesimulator \
             -destination "generic/platform=iOS Simulator" -derivedDataPath "$sim_derived" build \
             "${common_settings[@]}"
@@ -174,7 +192,7 @@ jobs:
           sim_app="${sim_apps[0]}"
           [ -f "$sim_app/Info.plist" ] || { echo "::error::Simulator Info.plist is missing"; exit 1; }
           plutil -replace CFBundleIdentifier -string com.example.kin.ios "$sim_app/Info.plist"
-          sim_root="$RUNNER_TEMP/kin-sim-root"
+          sim_root="$KIN_APPLE_ROOT/sim-root"
           mkdir -p "$sim_root"
           cp -R "$sim_app" "$sim_root/KIN.app"
           ditto -c -k --norsrc --keepParent "$sim_root/KIN.app" "$release/KIN-ios-simulator.zip"
@@ -186,9 +204,9 @@ jobs:
           if-no-files-found: error
           retention-days: 7
           path: |
-            ${{ runner.temp }}/kin-apple-release/KIN-macos.dmg
-            ${{ runner.temp }}/kin-apple-release/KIN-ios-unsigned.ipa
-            ${{ runner.temp }}/kin-apple-release/KIN-ios-simulator.zip
+            ${{ steps.stage_apple_source.outputs.release_path }}/KIN-macos.dmg
+            ${{ steps.stage_apple_source.outputs.release_path }}/KIN-ios-unsigned.ipa
+            ${{ steps.stage_apple_source.outputs.release_path }}/KIN-ios-simulator.zip
 
   android:
     needs: source-gate
