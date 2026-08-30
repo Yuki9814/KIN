@@ -214,7 +214,8 @@ final class InteractionCoreV2Tests: XCTestCase {
 
         XCTAssertEqual(result.images.count, 2)
         XCTAssertTrue(result.failures.isEmpty)
-        XCTAssertEqual(await client.attemptCount(), 3)
+        let attemptCount = await client.attemptCount()
+        XCTAssertEqual(attemptCount, 3)
         XCTAssertTrue(result.images.allSatisfy { $0.attempts >= 1 })
     }
 }
