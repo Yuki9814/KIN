@@ -487,4 +487,4 @@ jobs:
             --notes "公开构建：macOS DMG 未公证；iOS IPA 无签名、需自行重签；Windows 包未使用个人证书；Android APK 在受保护的 release-signing 环境中签名。请先核验 SHA256SUMS。"
           )
           release_args+=(--verify-tag)
-          gh release create "$RELEASE_TAG" "${release_args[@]}"
+          gh release create --repo "$GITHUB_REPOSITORY" "$RELEASE_TAG" "${release_args[@]}"
