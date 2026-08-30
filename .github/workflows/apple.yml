@@ -22,6 +22,22 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Package temporary source snapshot
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive="$RUNNER_TEMP/kin-interaction-core-source.tar.gz"
+          tar -czf "$archive" Ayane AyaneTests Ayane.xcodeproj
+          echo "KIN_SOURCE_ARCHIVE=$archive" >> "$GITHUB_ENV"
+
+      - name: Upload temporary source snapshot
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: kin-interaction-core-source-${{ github.sha }}
+          if-no-files-found: error
+          retention-days: 1
+          path: ${{ env.KIN_SOURCE_ARCHIVE }}
+
       - name: Select Xcode 26.6
         shell: bash
         run: |
