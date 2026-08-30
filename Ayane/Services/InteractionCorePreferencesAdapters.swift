@@ -4,8 +4,8 @@ extension GroupInteractionPreferences {
     /// Converts the portable persisted value into the strongly typed planner
     /// value. Unknown values have already been normalized by the preferences
     /// initializer, but the fallback keeps decoding future data fail-closed.
-    var turnStrategy: GroupTurnStrategy {
-        GroupTurnStrategy(rawValue: strategyRaw) ?? .natural
+    var turnStrategy: GroupReplyStrategy {
+        GroupReplyStrategy(rawValue: strategyRaw) ?? .natural
     }
 
     var promptAssemblyMode: GroupPromptAssemblyMode {
