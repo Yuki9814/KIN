@@ -354,4 +354,5 @@ scripts/kin-release-asset-gate.py
 scripts/kin-release-asset-gate.sh
 scripts/kin-test-preflight.sh
 scripts/kin-verify-main.sh
+scripts/test-kin-release-asset-gate.py
 scripts/verify-cloudkit-readiness.sh
