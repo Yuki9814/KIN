@@ -246,12 +246,15 @@ enum ChatAttachmentPreviewWriter {
     }
 }
 
-/// Shared two-choice attachment surface for one-to-one and group chats.
+/// Shared attachment surface for one-to-one and group chats. Image generation
+/// is optional because a generated companion image currently belongs only to a
+/// direct role conversation, while uploads remain available in both contexts.
 /// The panel owns picker selection and processing state; callers only receive
 /// normalized in-memory values and surface errors in their app model.
 struct ChatAttachmentPanel: View {
     let onImage: (Data) -> Void
     let onFile: (ChatFileAttachment) -> Void
+    let onGenerateImage: (() -> Void)?
     let onError: (String) -> Void
 
     @State private var photoSelection: PhotosPickerItem?
@@ -262,10 +265,12 @@ struct ChatAttachmentPanel: View {
     init(
         onImage: @escaping (Data) -> Void,
         onFile: @escaping (ChatFileAttachment) -> Void,
+        onGenerateImage: (() -> Void)? = nil,
         onError: @escaping (String) -> Void = { _ in }
     ) {
         self.onImage = onImage
         self.onFile = onFile
+        self.onGenerateImage = onGenerateImage
         self.onError = onError
     }
 
@@ -294,6 +299,22 @@ struct ChatAttachmentPanel: View {
                 .buttonStyle(.plain)
                 .disabled(isProcessing)
                 .accessibilityIdentifier("wechat.chat.attachment.file")
+
+                if let onGenerateImage {
+                    Button {
+                        guard !isProcessing else { return }
+                        localError = nil
+                        onGenerateImage()
+                    } label: {
+                        attachmentTile(
+                            title: "生成图片",
+                            systemImage: "sparkles.rectangle.stack"
+                        )
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(isProcessing)
+                    .accessibilityIdentifier("wechat.chat.attachment.generateImage")
+                }
             }
             .frame(maxWidth: .infinity)
 

@@ -28,18 +28,21 @@ import kotlinx.serialization.json.jsonObject
 import kotlin.math.roundToInt
 
 /**
- * One-way compatibility reader for Apple's sanitized AyaneDataExport v16 JSON.
+ * One-way compatibility reader for Apple's sanitized AyaneDataExport v17 JSON.
  *
  * Apple stores a richer SwiftData graph (evidence, summaries, moments, world
  * profiles and scheduler records) than the first KMP release. This adapter
  * imports only the shared core graph: profiles, relationships, messages,
  * memory assertions, tombstoned memories and embedded event attachments. It
  * intentionally ignores unsupported Apple-only collections rather than
- * pretending that they are represented by KMP models.
+ * pretending that they are represented by KMP models. The v17
+ * `moment_interactions.deleted_at` field therefore remains an Apple-side
+ * sticky tombstone: it is not converted into a live KMP record, and the
+ * adapter cannot resurrect it during import.
  */
 object AppleArchiveCompatibility {
     private const val minAppleSchema = 4
-    private const val maxAppleSchema = 16
+    private const val maxAppleSchema = 17
     private val json = Json {
         ignoreUnknownKeys = true
         isLenient = true

@@ -3280,6 +3280,7 @@ struct DataMergeService {
               interaction.body.count <= 500,
               interaction.createdAt.timeIntervalSince1970.isFinite,
               interaction.updatedAt.timeIntervalSince1970.isFinite,
+              interaction.deletedAt?.timeIntervalSince1970.isFinite ?? true,
               interaction.updatedAt >= interaction.createdAt,
               interaction.revision >= 0,
               interaction.deviceID.count <= 256 else {
@@ -3762,18 +3763,32 @@ struct DataMergeService {
         current: AyaneMomentInteractionExport,
         incoming: AyaneMomentInteractionExport
     ) -> AyaneMomentInteractionExport {
+        let versionWinner: AyaneMomentInteractionExport
         if incoming.revision != current.revision {
-            return incoming.revision > current.revision ? incoming : current
+            versionWinner = incoming.revision > current.revision ? incoming : current
+        } else if incoming.updatedAt != current.updatedAt {
+            versionWinner = incoming.updatedAt > current.updatedAt ? incoming : current
+        } else if incoming.deviceID != current.deviceID {
+            versionWinner = incoming.deviceID > current.deviceID ? incoming : current
+        } else {
+            versionWinner = momentInteractionFingerprint(incoming) > momentInteractionFingerprint(current)
+                ? incoming
+                : current
         }
-        if incoming.updatedAt != current.updatedAt {
-            return incoming.updatedAt > current.updatedAt ? incoming : current
+
+        // A deletion is a sticky field. Keep the existing revision/date/device
+        // winner for conflict semantics, but carry the newest known tombstone
+        // onto it so a stale live copy can never resurrect the interaction.
+        guard let newestDeletion = [current.deletedAt, incoming.deletedAt]
+            .compactMap({ $0 })
+            .max() else {
+            return versionWinner
         }
-        if incoming.deviceID != current.deviceID {
-            return incoming.deviceID > current.deviceID ? incoming : current
+        var result = versionWinner
+        if result.deletedAt == nil || result.deletedAt! < newestDeletion {
+            result.deletedAt = newestDeletion
         }
-        return momentInteractionFingerprint(incoming) > momentInteractionFingerprint(current)
-            ? incoming
-            : current
+        return result
     }
 
     private static func momentInteractionFingerprint(
@@ -3784,6 +3799,7 @@ struct DataMergeService {
             interaction.actorKindRaw, optionalUUID(interaction.actorRoleID),
             optionalUUID(interaction.parentInteractionID), optionalUUID(interaction.rootInteractionID),
             string(interaction.body), date(interaction.createdAt), date(interaction.updatedAt),
+            optionalDate(interaction.deletedAt),
             String(interaction.revision), string(interaction.deviceID)
         ].joined(separator: "|")
     }
@@ -4712,6 +4728,7 @@ struct DataMergeService {
             body: item.body,
             createdAt: item.createdAt,
             updatedAt: item.updatedAt,
+            deletedAt: item.deletedAt,
             revision: item.revision,
             deviceID: item.deviceID
         )
@@ -5060,6 +5077,7 @@ struct DataMergeService {
         record.body = item.body
         record.createdAt = item.createdAt
         record.updatedAt = item.updatedAt
+        record.deletedAt = item.deletedAt
         record.revision = item.revision
         record.deviceID = item.deviceID
     }

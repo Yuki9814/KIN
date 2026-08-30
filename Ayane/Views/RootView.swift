@@ -59,6 +59,20 @@ struct RootView: View {
                 appModel.processDueProactiveTasks()
             }
         }
+        #if os(iOS)
+        .onReceive(
+            NotificationCenter.default.publisher(
+                for: .kinProactiveNotificationRouteRequested
+            )
+        ) { _ in
+            selection = .chats
+        }
+        .task {
+            if KINNotificationRouter.shared.hasPendingRoute {
+                selection = .chats
+            }
+        }
+        #endif
     }
 
     @ViewBuilder

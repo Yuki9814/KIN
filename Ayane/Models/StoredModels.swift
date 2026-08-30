@@ -330,7 +330,10 @@ final class MomentPostRecord {
 }
 
 /// Likes and comments share one append-only value model. A like is removed
-/// when toggled off; comments remain independent records.
+/// when toggled off; comments retain a tombstone when the author removes one.
+/// The optional deletion timestamp is intentionally part of the row instead
+/// of a physical delete so imports, CloudKit and duplicate reconciliation can
+/// carry the removal decision across devices.
 @Model
 final class MomentInteractionRecord {
     var id: UUID = UUID()
@@ -346,6 +349,10 @@ final class MomentInteractionRecord {
     var body: String = ""
     var createdAt: Date = Date()
     var updatedAt: Date = Date()
+    /// Nil means the interaction is live. Adding this optional column is a
+    /// SwiftData lightweight migration for stores written before comment
+    /// deletion existed.
+    var deletedAt: Date? = nil
     var revision: Int = 0
     var deviceID: String = ""
 
@@ -360,6 +367,7 @@ final class MomentInteractionRecord {
         body: String = "",
         createdAt: Date = Date(),
         updatedAt: Date = Date(),
+        deletedAt: Date? = nil,
         revision: Int = 0,
         deviceID: String = ""
     ) {
@@ -373,6 +381,7 @@ final class MomentInteractionRecord {
         self.body = body
         self.createdAt = createdAt
         self.updatedAt = updatedAt
+        self.deletedAt = deletedAt
         self.revision = max(0, revision)
         self.deviceID = deviceID
     }
@@ -383,6 +392,19 @@ final class MomentInteractionRecord {
 
     var actorKind: MomentAuthorKind {
         MomentAuthorKind(rawValue: actorKindRaw) ?? .user
+    }
+
+    var isDeleted: Bool { deletedAt != nil }
+
+    /// Applies the local soft-delete mutation while preserving the row's
+    /// identity. Repeating the operation is idempotent for an already deleted
+    /// row and therefore does not create a newer competing version.
+    func softDelete(at timestamp: Date = Date(), deviceID sourceDeviceID: String) {
+        guard deletedAt == nil else { return }
+        deletedAt = timestamp
+        updatedAt = timestamp
+        revision = max(0, revision) + 1
+        deviceID = sourceDeviceID
     }
 }
 

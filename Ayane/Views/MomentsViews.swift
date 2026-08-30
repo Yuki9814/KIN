@@ -76,7 +76,7 @@ struct MomentsMigrationView: View {
                                             avatarImageData: post.authorAvatarImageData
                                         )
                                     },
-                                    toggleLike: post.isUserAuthored ? nil : {
+                                    toggleLike: {
                                         perform {
                                             try appModel.toggleUserMomentLike(postID: post.id)
                                         }
@@ -90,7 +90,16 @@ struct MomentsMigrationView: View {
                                     },
                                     delete: post.isUserAuthored ? {
                                         perform { try appModel.deleteUserMoment(id: post.id) }
-                                    } : nil
+                                    } : nil,
+                                    deleteComment: { interaction in
+                                        guard interaction.actorKind == .user else { return }
+                                        perform {
+                                            try appModel.deleteUserMomentComment(
+                                                id: interaction.id,
+                                                postID: post.id
+                                            )
+                                        }
+                                    }
                                 )
                                 MomentsRowDivider(leading: 70)
                             }
@@ -126,7 +135,21 @@ struct MomentsMigrationView: View {
         .toolbarBackground(.hidden, for: .navigationBar)
         .tint(.white)
         .toolbar {
-            ToolbarItem(placement: .topBarTrailing) {
+            ToolbarItemGroup(placement: .topBarTrailing) {
+                Button {
+                    showsNotifications = true
+                } label: {
+                    MomentsNotificationToolbarLabel(count: appModel.momentsUnreadCount)
+                        .frame(width: 44, height: 44)
+                }
+                .accessibilityLabel("朋友圈消息")
+                .accessibilityValue(
+                    appModel.momentsUnreadCount > 0
+                        ? "\(appModel.momentsUnreadCount)条未读"
+                        : "无未读消息"
+                )
+                .accessibilityIdentifier("wechat.moments.notifications")
+
                 Button {
                     actionMenuPresented = true
                 } label: {
@@ -408,6 +431,9 @@ private struct MomentsFeedPostRow: View {
     let toggleLike: (() -> Void)?
     let comment: ((MomentInteractionSummary?) -> Void)?
     let delete: (() -> Void)?
+    let deleteComment: ((MomentInteractionSummary) -> Void)?
+
+    @State private var pendingCommentDeletion: MomentInteractionSummary?
 
     var body: some View {
         HStack(alignment: .top, spacing: 12) {
@@ -453,7 +479,8 @@ private struct MomentsFeedPostRow: View {
                 if !post.interactions.isEmpty {
                     MomentInteractionsPanel(
                         post: post,
-                        onReply: { interaction in comment?(interaction) }
+                        onReply: { interaction in comment?(interaction) },
+                        onDelete: { interaction in requestCommentDeletion(interaction) }
                     )
                 }
             }
@@ -463,6 +490,27 @@ private struct MomentsFeedPostRow: View {
         .background(MomentsSemantic.surface)
         .accessibilityElement(children: .contain)
         .onAppear(perform: onVisible)
+        .confirmationDialog(
+            "删除评论？",
+            isPresented: Binding(
+                get: { pendingCommentDeletion != nil },
+                set: { isPresented in
+                    if !isPresented { pendingCommentDeletion = nil }
+                }
+            ),
+            titleVisibility: .visible
+        ) {
+            Button("删除评论", role: .destructive) {
+                guard let pendingCommentDeletion else { return }
+                self.pendingCommentDeletion = nil
+                deleteComment?(pendingCommentDeletion)
+            }
+            Button("取消", role: .cancel) {
+                pendingCommentDeletion = nil
+            }
+        } message: {
+            Text("仅可删除你自己的评论，删除后不可恢复")
+        }
     }
 
     #if os(macOS)
@@ -483,13 +531,18 @@ private struct MomentsFeedPostRow: View {
                         systemImage: post.userDidLike ? "heart.fill" : "heart"
                     )
                     .font(.system(size: 12, weight: .medium))
-                    .frame(minWidth: 54, minHeight: 30)
+                    .frame(minWidth: 54, minHeight: 44)
                 }
                 .buttonStyle(.borderless)
-                .foregroundStyle(post.userDidLike ? AppTheme.accent : .secondary)
+                .foregroundStyle(
+                    post.userDidLike
+                        ? AppTheme.momentsLikeAccent
+                        : AppTheme.secondaryText
+                )
                 .opacity(toggleLike == nil ? 0.48 : 1)
                 .disabled(toggleLike == nil)
                 .accessibilityLabel(post.userDidLike ? "取消赞" : "赞")
+                .accessibilityValue(post.userDidLike ? "已点赞" : "未点赞")
                 .accessibilityIdentifier("wechat.moment.like.\(post.id.uuidString)")
 
                 Button {
@@ -497,7 +550,7 @@ private struct MomentsFeedPostRow: View {
                 } label: {
                     Label("评论", systemImage: "bubble.left")
                         .font(.system(size: 12, weight: .medium))
-                        .frame(minWidth: 60, minHeight: 30)
+                        .frame(minWidth: 60, minHeight: 44)
                 }
                 .buttonStyle(.borderless)
                 .foregroundStyle(.secondary)
@@ -521,7 +574,7 @@ private struct MomentsFeedPostRow: View {
                 }
                 .foregroundStyle(.secondary)
                 .padding(.horizontal, 10)
-                .frame(minHeight: 32)
+                .frame(minHeight: 44)
                 .background(MomentsSemantic.groupedSurface)
                 .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
             }
@@ -546,13 +599,18 @@ private struct MomentsFeedPostRow: View {
             } label: {
                 Image(systemName: post.userDidLike ? "heart.fill" : "heart")
                     .font(.system(size: 17, weight: .semibold))
-                    .foregroundStyle(post.userDidLike ? AppTheme.accent : AppTheme.secondaryText)
+                    .foregroundStyle(
+                        post.userDidLike
+                            ? AppTheme.momentsLikeAccent
+                            : AppTheme.secondaryText
+                    )
                     .frame(minWidth: 44, minHeight: 44)
                     .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
             .opacity(toggleLike == nil ? 0.48 : 1)
             .accessibilityLabel(post.userDidLike ? "取消赞" : "赞")
+            .accessibilityValue(post.userDidLike ? "已点赞" : "未点赞")
             .accessibilityIdentifier("wechat.moment.like.\(post.id.uuidString)")
 
             Button {
@@ -577,7 +635,16 @@ private struct MomentsFeedPostRow: View {
     private var momentMenu: some View {
         Menu {
             if let toggleLike {
-                Button(post.userDidLike ? "取消赞" : "赞", action: toggleLike)
+                Button(
+                    post.userDidLike ? "取消赞" : "赞",
+                    systemImage: post.userDidLike ? "heart.fill" : "heart",
+                    action: toggleLike
+                )
+                .tint(
+                    post.userDidLike
+                        ? AppTheme.momentsLikeAccent
+                        : AppTheme.secondaryText
+                )
             }
             if let comment {
                 Button("评论", action: { comment(nil) })
@@ -595,6 +662,13 @@ private struct MomentsFeedPostRow: View {
         }
         .menuStyle(.borderlessButton)
         .accessibilityLabel("动态更多操作")
+    }
+
+    private func requestCommentDeletion(_ interaction: MomentInteractionSummary) {
+        guard interaction.kind == .comment,
+              interaction.actorKind == .user,
+              deleteComment != nil else { return }
+        pendingCommentDeletion = interaction
     }
 }
 
@@ -690,6 +764,7 @@ private struct MomentImageViewer: View {
 private struct MomentInteractionsPanel: View {
     let post: MomentPostSummary
     let onReply: (MomentInteractionSummary) -> Void
+    let onDelete: ((MomentInteractionSummary) -> Void)?
 
     private var commentsByID: [UUID: MomentInteractionSummary] {
         Dictionary(uniqueKeysWithValues: post.comments.map { ($0.id, $0) })
@@ -699,12 +774,13 @@ private struct MomentInteractionsPanel: View {
         VStack(alignment: .leading, spacing: 0) {
             if !post.likes.isEmpty {
                 HStack(alignment: .top, spacing: 6) {
-                    Image(systemName: "heart")
+                    Image(systemName: "heart.fill")
                         .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(AppTheme.momentsLikeAccent)
                     Text(post.likes.map(\.actorName).joined(separator: "，"))
                         .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(MomentsSemantic.accent)
                 }
-                .foregroundStyle(MomentsSemantic.accent)
                 .padding(.horizontal, 9)
                 .padding(.vertical, 7)
             }
@@ -714,18 +790,36 @@ private struct MomentInteractionsPanel: View {
             }
 
             ForEach(post.comments) { item in
-                Button {
-                    onReply(item)
-                } label: {
-                    commentLabel(item)
-                        .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
-                        .contentShape(Rectangle())
+                HStack(alignment: .top, spacing: 0) {
+                    Button {
+                        onReply(item)
+                    } label: {
+                        commentLabel(item)
+                            .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("回复\(item.actorName)：\(item.body)")
+                    .accessibilityHint("点击回复这条评论")
+                    .accessibilityIdentifier("wechat.moment.reply.\(item.id.uuidString)")
+
+                    if item.actorKind == .user, let onDelete {
+                        Button {
+                            onDelete(item)
+                        } label: {
+                            Text("删除")
+                                .font(.system(size: 13, weight: .medium))
+                                .foregroundStyle(MomentsSemantic.accent)
+                                .frame(minWidth: 44, minHeight: 44)
+                                .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("删除自己的评论")
+                        .accessibilityHint("删除后不可恢复")
+                        .accessibilityIdentifier("wechat.moment.delete-comment.\(item.id.uuidString)")
+                    }
                 }
-                .buttonStyle(.plain)
                 .padding(.horizontal, 9)
-                .accessibilityLabel("回复\(item.actorName)：\(item.body)")
-                .accessibilityHint("点击回复这条评论")
-                .accessibilityIdentifier("wechat.moment.reply.\(item.id.uuidString)")
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -803,6 +897,7 @@ private struct MomentsNotificationToolbarLabel: View {
 private struct MomentsNotificationsView: View {
     @Environment(AppModel.self) private var appModel
     @Environment(\.dismiss) private var dismiss
+    @State private var selectedAuthor: MomentAuthorSelection?
 
     var body: some View {
         NavigationStack {
@@ -815,7 +910,14 @@ private struct MomentsNotificationsView: View {
                     )
                 } else {
                     List(notifications) { item in
-                        MomentNotificationRow(item: item)
+                        MomentNotificationRow(item: item) {
+                            selectedAuthor = MomentAuthorSelection(
+                                kind: .companion,
+                                roleID: item.interaction.actorRoleID,
+                                name: item.interaction.actorName,
+                                avatarImageData: item.actorAvatarImageData
+                            )
+                        }
                             .listRowBackground(MomentsSemantic.surface)
                     }
                     #if os(macOS)
@@ -835,6 +937,22 @@ private struct MomentsNotificationsView: View {
             }
         }
         .frame(minWidth: 500, minHeight: 420)
+        .sheet(item: $selectedAuthor) { author in
+            if author.kind == .companion, let roleID = author.roleID {
+                #if os(macOS)
+                NavigationStack {
+                    CompanionContactView(roleID: roleID)
+                }
+                .frame(minWidth: 450, minHeight: 560)
+                #else
+                NavigationStack {
+                    CompanionContactView(roleID: roleID)
+                }
+                #endif
+            } else {
+                MomentAuthorTimeline(author: author)
+            }
+        }
         .task {
             appModel.markMomentsRead()
         }
@@ -867,49 +985,57 @@ private struct MomentsNotificationsView: View {
 
 private struct MomentNotificationRow: View {
     let item: MomentNotificationItem
+    let openAuthor: () -> Void
 
     var body: some View {
-        HStack(alignment: .top, spacing: 12) {
-            CompanionAvatar(
-                size: 40,
-                name: item.interaction.actorName,
-                imageData: item.actorAvatarImageData
-            )
+        Button(action: openAuthor) {
+            HStack(alignment: .top, spacing: 12) {
+                CompanionAvatar(
+                    size: 40,
+                    name: item.interaction.actorName,
+                    imageData: item.actorAvatarImageData
+                )
 
-            VStack(alignment: .leading, spacing: 5) {
-                HStack(alignment: .firstTextBaseline, spacing: 8) {
-                    Text(item.title)
-                        .font(.system(size: 13, weight: .medium))
-                        .foregroundStyle(.primary)
-                    Spacer(minLength: 8)
-                    Text(item.interaction.createdAt, style: .relative)
-                        .font(.caption)
-                        .foregroundStyle(.tertiary)
-                }
+                VStack(alignment: .leading, spacing: 5) {
+                    HStack(alignment: .firstTextBaseline, spacing: 8) {
+                        Text(item.title)
+                            .font(.system(size: 13, weight: .medium))
+                            .foregroundStyle(.primary)
+                        Spacer(minLength: 8)
+                        Text(item.interaction.createdAt, style: .relative)
+                            .font(.caption)
+                            .foregroundStyle(.tertiary)
+                    }
 
-                Text(item.detail)
-                    .font(.system(size: 13))
-                    .foregroundStyle(.secondary)
-                    .lineLimit(2)
+                    Text(item.detail)
+                        .font(.system(size: 13))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
 
-                HStack(spacing: 8) {
-                    Text(item.post.body.isEmpty ? "图片朋友圈" : item.post.body)
-                        .font(.caption)
-                        .foregroundStyle(.tertiary)
-                        .lineLimit(1)
-                    Spacer(minLength: 4)
-                    if let image = postImage {
-                        image
-                            .resizable()
-                            .scaledToFill()
-                            .frame(width: 42, height: 42)
-                            .clipped()
+                    HStack(spacing: 8) {
+                        Text(item.post.body.isEmpty ? "图片朋友圈" : item.post.body)
+                            .font(.caption)
+                            .foregroundStyle(.tertiary)
+                            .lineLimit(1)
+                        Spacer(minLength: 4)
+                        if let image = postImage {
+                            image
+                                .resizable()
+                                .scaledToFill()
+                                .frame(width: 42, height: 42)
+                                .clipped()
+                        }
                     }
                 }
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.vertical, 8)
         }
-        .padding(.vertical, 8)
-        .accessibilityElement(children: .combine)
+        .buttonStyle(.plain)
+        .contentShape(Rectangle())
+        .accessibilityLabel("\(item.interaction.actorName)的朋友圈消息：\(item.detail)")
+        .accessibilityHint("打开\(item.interaction.actorName)的资料")
+        .accessibilityIdentifier("wechat.moment.notification.\(item.id.uuidString)")
     }
 
     private var postImage: Image? {
@@ -1273,6 +1399,8 @@ private struct MomentAuthorTimeline: View {
     var presentation: MomentTimelinePresentation = .sheet
 
     @State private var selectedComment: MomentCommentTarget?
+    @State private var selectedAuthor: MomentAuthorSelection?
+    @State private var showsUserProfileEditor = false
     @State private var commentDrafts: [UUID: String] = [:]
     @FocusState private var commentInputFocused: Bool
     @State private var localStatus: String?
@@ -1294,16 +1422,22 @@ private struct MomentAuthorTimeline: View {
     private var timelineContent: some View {
         ScrollView {
             LazyVStack(spacing: 0) {
-                HStack(spacing: 14) {
-                    if author.kind == .user {
-                        UserAvatar(size: 62, name: author.name, imageData: author.avatarImageData)
-                    } else {
-                        CompanionAvatar(size: 62, name: author.name, imageData: author.avatarImageData)
+                Button(action: openTimelineAuthor) {
+                    HStack(spacing: 14) {
+                        if author.kind == .user {
+                            UserAvatar(size: 62, name: author.name, imageData: author.avatarImageData)
+                        } else {
+                            CompanionAvatar(size: 62, name: author.name, imageData: author.avatarImageData)
+                        }
+                        Text(author.name).font(.title3.weight(.semibold))
+                        Spacer()
                     }
-                    Text(author.name).font(.title3.weight(.semibold))
-                    Spacer()
+                    .contentShape(Rectangle())
                 }
+                .buttonStyle(.plain)
+                .frame(minHeight: 44)
                 .padding(18)
+                .accessibilityLabel("查看\(author.name)的资料")
 
                 if let localStatus, selectedComment == nil {
                     Text(localStatus)
@@ -1318,8 +1452,14 @@ private struct MomentAuthorTimeline: View {
                     MomentsFeedPostRow(
                         post: post,
                         onVisible: { appModel.markMomentRead(postID: post.id) },
-                        openAuthor: {},
-                        toggleLike: post.isUserAuthored ? nil : {
+                        openAuthor: {
+                            if author.kind == .user {
+                                showsUserProfileEditor = true
+                            } else {
+                                selectedAuthor = author
+                            }
+                        },
+                        toggleLike: {
                             perform { try appModel.toggleUserMomentLike(postID: post.id) }
                         },
                         comment: { parent in
@@ -1331,7 +1471,16 @@ private struct MomentAuthorTimeline: View {
                         },
                         delete: post.isUserAuthored ? {
                             perform { try appModel.deleteUserMoment(id: post.id) }
-                        } : nil
+                        } : nil,
+                        deleteComment: { interaction in
+                            guard interaction.actorKind == .user else { return }
+                            perform {
+                                try appModel.deleteUserMomentComment(
+                                    id: interaction.id,
+                                    postID: post.id
+                                )
+                            }
+                        }
                     )
                     MomentsRowDivider(leading: 70)
                 }
@@ -1367,6 +1516,25 @@ private struct MomentAuthorTimeline: View {
             }
         }
         .navigationTitle(author.kind == .user ? "我的朋友圈" : "朋友圈")
+        .sheet(item: $selectedAuthor) { selected in
+            if selected.kind == .companion, let roleID = selected.roleID {
+                #if os(macOS)
+                NavigationStack {
+                    CompanionContactView(roleID: roleID)
+                }
+                .frame(minWidth: 450, minHeight: 560)
+                #else
+                NavigationStack {
+                    CompanionContactView(roleID: roleID)
+                }
+                #endif
+            } else {
+                UserMomentsProfileEditor(status: $localStatus)
+            }
+        }
+        .sheet(isPresented: $showsUserProfileEditor) {
+            UserMomentsProfileEditor(status: $localStatus)
+        }
         .onChange(of: selectedComment?.id) { _, newID in
             if newID == nil {
                 commentInputFocused = false
@@ -1388,6 +1556,14 @@ private struct MomentAuthorTimeline: View {
             guard post.authorKind == author.kind else { return false }
             if author.kind == .user { return true }
             return post.authorRoleID == author.roleID
+        }
+    }
+
+    private func openTimelineAuthor() {
+        if author.kind == .user {
+            showsUserProfileEditor = true
+        } else {
+            selectedAuthor = author
         }
     }
 

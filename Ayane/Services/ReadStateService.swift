@@ -484,7 +484,8 @@ final class ReadStateService {
         _ interaction: MomentInteractionRecord,
         after marker: MomentReadStateRecord?
     ) -> Bool {
-        isUnreadMomentCursor(
+        guard interaction.deletedAt == nil else { return false }
+        return isUnreadMomentCursor(
             MomentReadCursor(interaction: interaction),
             after: marker
         )
@@ -570,6 +571,7 @@ final class ReadStateService {
             return $0.postID == postID
                 && $0.actorKind == .companion
                 && actorIsAvailable
+                && $0.deletedAt == nil
                 && ($0.kind == .like || $0.kind == .comment)
         }
     }

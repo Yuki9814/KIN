@@ -177,6 +177,109 @@ final class AppModelPersonaTests: XCTestCase {
         XCTAssertTrue(system.contains("用户称呼：阿澈"))
     }
 
+    func testChatPromptCarriesStoredTimeForYesterdayPlanAndCurrentTurn() async throws {
+        let (defaults, suiteName) = try makeDefaults(configureProvider: true)
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        defaults.set(true, forKey: SettingsKeys.timeInjectionEnabled)
+        let bootstrap = PersistenceController.makeContainer(inMemory: true, preferCloud: false)
+        let client = PersonaCapturingAIClient()
+        let appModel = makeAppModel(
+            bootstrap: bootstrap,
+            defaults: defaults,
+            client: client
+        )
+
+        let oldPlanText = "我要去玩一小时游戏，再回来找你。"
+        let storeContext = ModelContext(bootstrap.container)
+        storeContext.insert(ConversationEvent(
+            conversationID: appModel.currentConversation.id,
+            deviceID: "seed-device",
+            deviceSequence: 900,
+            logicalTimestamp: "seed-yesterday-plan",
+            occurredAt: Date().addingTimeInterval(-26 * 60 * 60),
+            role: .user,
+            content: oldPlanText,
+            contentHash: "seed-yesterday-plan",
+            roleID: appModel.currentRoleID
+        ))
+        try storeContext.save()
+        appModel.refreshFromStore(force: true)
+
+        appModel.send("今天想聊点别的。")
+        try await waitUntil { !appModel.isGenerating && appModel.messages.count >= 3 }
+
+        let captured = try XCTUnwrap(client.capturedChatMessages())
+        let system = try XCTUnwrap(captured.first(where: { $0.role == "system" }))
+        XCTAssertTrue(system.content.contains("不得把旧计划当作用户刚刚提出"))
+        XCTAssertTrue(system.content.contains("上一次已成功发送的用户消息发生于"))
+
+        let userMessages = captured.filter { $0.role == "user" }
+        let oldPlan = try XCTUnwrap(userMessages.first(where: { $0.content.contains(oldPlanText) }))
+        XCTAssertTrue(oldPlan.content.contains("【本地消息时间："))
+        XCTAssertTrue(oldPlan.content.contains("距当前约1天"))
+
+        let current = try XCTUnwrap(userMessages.first(where: { $0.content.contains("今天想聊点别的。") }))
+        XCTAssertTrue(current.content.contains("【本地消息时间："))
+        XCTAssertTrue(current.content.contains("今天，距当前不足1分钟"))
+    }
+
+    func testTimeContextFindsPreviousUserBeyondVisibleMessageWindow() async throws {
+        let (defaults, suiteName) = try makeDefaults(configureProvider: true)
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        defaults.set(true, forKey: SettingsKeys.timeInjectionEnabled)
+        let bootstrap = PersistenceController.makeContainer(inMemory: true, preferCloud: false)
+        let client = PersonaCapturingAIClient()
+        let appModel = makeAppModel(
+            bootstrap: bootstrap,
+            defaults: defaults,
+            client: client
+        )
+        let storeContext = ModelContext(bootstrap.container)
+        let oldUserAt = Date().addingTimeInterval(-48 * 60 * 60)
+        let oldUser = ConversationEvent(
+            conversationID: appModel.currentConversation.id,
+            deviceID: "window-seed",
+            deviceSequence: 1,
+            logicalTimestamp: "window-user",
+            occurredAt: oldUserAt,
+            role: .user,
+            content: "窗口之外的上一条用户消息",
+            contentHash: "window-user",
+            roleID: appModel.currentRoleID
+        )
+        storeContext.insert(oldUser)
+        let assistantStart = Date().addingTimeInterval(-60 * 60)
+        for index in 0..<241 {
+            let content = "填充回复 \(index)"
+            storeContext.insert(ConversationEvent(
+                conversationID: appModel.currentConversation.id,
+                deviceID: "window-seed",
+                deviceSequence: index + 2,
+                logicalTimestamp: String(format: "window-%03d", index),
+                occurredAt: assistantStart.addingTimeInterval(TimeInterval(index)),
+                role: .assistant,
+                content: content,
+                contentHash: content,
+                roleID: appModel.currentRoleID
+            ))
+        }
+        try storeContext.save()
+        appModel.refreshFromStore(force: true)
+        XCTAssertFalse(appModel.messages.contains(where: { $0.id == oldUser.id }))
+
+        appModel.send("现在重新说话。")
+        try await waitUntil {
+            !appModel.isGenerating && client.capturedChatMessages() != nil
+        }
+
+        let system = try XCTUnwrap(
+            client.capturedChatMessages()?.first(where: { $0.role == "system" })
+        )
+        XCTAssertTrue(system.content.contains("上一次已成功发送的用户消息发生于"))
+        XCTAssertTrue(system.content.contains("间隔分类 1-3d"))
+        XCTAssertFalse(system.content.contains("暂无上次有效消息"))
+    }
+
     func testConnectionTestIgnoresAnOlderResultAfterRestarting() async throws {
         let (defaults, suiteName) = try makeDefaults(configureProvider: true)
         defer { defaults.removePersistentDomain(forName: suiteName) }
@@ -352,6 +455,7 @@ private final class CredentialCapturingAIClient: AIClientProtocol, @unchecked Se
 private final class PersonaCapturingAIClient: AIClientProtocol, @unchecked Sendable {
     private let lock = NSLock()
     private var systemMessage: String?
+    private var chatMessages: [APIChatMessage]?
 
     func streamChat(
         messages: [APIChatMessage],
@@ -397,9 +501,16 @@ private final class PersonaCapturingAIClient: AIClientProtocol, @unchecked Senda
         return systemMessage
     }
 
+    func capturedChatMessages() -> [APIChatMessage]? {
+        lock.lock()
+        defer { lock.unlock() }
+        return chatMessages
+    }
+
     private func capture(_ messages: [APIChatMessage]) {
         lock.lock()
         systemMessage = messages.first(where: { $0.role == "system" })?.content
+        chatMessages = messages
         lock.unlock()
     }
 }

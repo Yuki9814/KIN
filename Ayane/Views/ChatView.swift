@@ -20,6 +20,8 @@ struct ChatView: View {
     @State private var showsContactDetails = false
     @State private var showsStickerPicker = false
     @State private var showsMoreOptions = false
+    @State private var showsImageGenerationPrompt = false
+    @State private var imageGenerationPrompt = ""
     @State private var pendingMessageDeletion: PendingMessageDeletion?
     @State private var recentStickerIDs: [String] = StickerRecentStore.load()
     @AppStorage(SettingsKeys.typingIndicatorEnabled) private var typingIndicatorEnabled = true
@@ -240,6 +242,9 @@ struct ChatView: View {
         } message: {
             Text("“\(pendingMessageDeletion?.preview ?? "这条消息")”以及它之后你和角色的消息都会被删除，之前的内容会保留。")
         }
+        .sheet(isPresented: $showsImageGenerationPrompt) {
+            imageGenerationPromptSheet
+        }
         #if os(iOS)
         .background(AppTheme.rootBackground.ignoresSafeArea())
         .navigationBarBackButtonHidden(true)
@@ -258,6 +263,52 @@ struct ChatView: View {
             .frame(minWidth: 480, minHeight: 620)
         }
         #endif
+    }
+
+    private var imageGenerationPromptSheet: some View {
+        NavigationStack {
+            Form {
+                Section("画面描述") {
+                    TextField(
+                        "例如：雨夜便利店门口，电影感，暖色灯光",
+                        text: $imageGenerationPrompt,
+                        axis: .vertical
+                    )
+                    .lineLimit(4...8)
+                    .autocorrectionDisabled()
+                    .accessibilityIdentifier("wechat.imageGeneration.prompt")
+                }
+
+                Section {
+                    Text("图片由“AI 连接与订阅”中的独立生图接口生成，成功后会作为 \(appModel.persona.name) 发出的图片保存在当前聊天中。")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .formStyle(.grouped)
+            .navigationTitle("生成图片")
+            #if os(macOS)
+            .frame(minWidth: 440, minHeight: 300)
+            #endif
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("取消") {
+                        showsImageGenerationPrompt = false
+                    }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("生成") {
+                        submitImageGeneration()
+                    }
+                    .disabled(
+                        imageGenerationPrompt
+                            .trimmingCharacters(in: .whitespacesAndNewlines)
+                            .isEmpty
+                    )
+                    .accessibilityIdentifier("wechat.imageGeneration.submit")
+                }
+            }
+        }
     }
 
     @ViewBuilder
@@ -386,6 +437,9 @@ struct ChatView: View {
         for message: ConversationEvent,
         persistedSegments: [String]?
     ) -> some View {
+        let pokeAction: (() -> Void)? = message.role == .assistant
+            ? { appModel.pokeCurrentCompanion() }
+            : nil
         let bubble = MessageBubble(
             role: message.role,
             content: message.content,
@@ -401,6 +455,7 @@ struct ChatView: View {
             companionName: appModel.persona.name,
             companionAvatarImageData: appModel.persona.avatarImageData,
             companionAvatarAction: { showsContactDetails = true },
+            companionAvatarPokeAction: pokeAction,
             userName: appModel.userProfile.displayName,
             userAvatarImageData: appModel.userProfile.avatarImageData
         )
@@ -464,10 +519,6 @@ struct ChatView: View {
 
     private func send() {
         guard composerEnabled else { return }
-        guard appModel.isProviderConfigured else {
-            appModel.errorMessage = "请先在设置中填写 API 地址和模型名称。"
-            return
-        }
         let value = draft
         draft = ""
         appModel.send(value)
@@ -502,9 +553,27 @@ struct ChatView: View {
                 )
                 showsMoreOptions = false
             },
+            onGenerateImage: {
+                imageGenerationPrompt = ""
+                showsImageGenerationPrompt = true
+            },
             onError: { message in
                 appModel.errorMessage = message
             }
+        )
+    }
+
+    private func submitImageGeneration() {
+        let prompt = imageGenerationPrompt
+        let targetRoleID = appModel.currentRoleID
+        let targetConversationID = appModel.currentConversation.id
+        showsImageGenerationPrompt = false
+        showsMoreOptions = false
+        imageGenerationPrompt = ""
+        appModel.generateImage(
+            prompt: prompt,
+            targetRoleID: targetRoleID,
+            targetConversationID: targetConversationID
         )
     }
 

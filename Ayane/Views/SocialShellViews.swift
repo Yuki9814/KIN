@@ -598,7 +598,10 @@ struct CompanionContactView: View {
         if AffinityPolicy.band(for: score) == .absoluteObedience {
             return "100 / 100 · 绝对顺从"
         }
-        return "\(Int(score.rounded())) / 100"
+        // The strategy layer floors finite scores (e.g. 19.75 -> 19), so the
+        // contact card must render the same normalized value rather than
+        // rounding up into the next visible number.
+        return "\(AffinityPolicy.parameters(for: score).normalizedScore) / 100"
     }
 
     private var currentConnectionName: String {

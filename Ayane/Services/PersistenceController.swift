@@ -29,7 +29,11 @@ struct PersistenceBootstrap {
 }
 
 enum PersistenceController {
-    private static let currentSchemaVersion = 16
+    // v17 adds the optional MomentInteractionRecord.deletedAt column. Keep
+    // this independent from the wire export version: a local SwiftData store
+    // must receive a pre-migration backup even when older export readers can
+    // safely ignore the new optional field.
+    private static let currentSchemaVersion = 17
     private static let migrationBackupVersionKey = "persistence.localMigrationBackupVersion"
 
     static let schema = Schema([
@@ -275,7 +279,7 @@ enum PersistenceController {
         )
     }
 
-    /// Before the first v16 open, retain a physical copy of the local SQLite
+    /// Before the first v17 open, retain a physical copy of the local SQLite
     /// store and its sidecars. This runs before SwiftData can migrate the file,
     /// is skipped for new installs and in-memory tests, and never overwrites an
     /// earlier backup.

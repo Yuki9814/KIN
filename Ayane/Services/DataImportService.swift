@@ -365,7 +365,8 @@ struct DataImportService {
                 || version == 12
                 || version == 13
                 || version == 14
-                || version == 15 else {
+                || version == 15
+                || version == 16 else {
             throw DataImportError.unsupportedSchema(version)
         }
     }
@@ -537,7 +538,8 @@ struct DataImportService {
                 || payload.schemaVersion == 12
                 || payload.schemaVersion == 13
                 || payload.schemaVersion == 14
-                || payload.schemaVersion == 15 else {
+                || payload.schemaVersion == 15
+                || payload.schemaVersion == 16 else {
             throw DataImportError.unsupportedSchema(payload.schemaVersion)
         }
         guard !payload.conversations.isEmpty else {
@@ -1064,6 +1066,7 @@ struct DataImportService {
                   interaction.body.count <= momentInteractionBodyMaximumLength,
                   interaction.createdAt.timeIntervalSince1970.isFinite,
                   interaction.updatedAt.timeIntervalSince1970.isFinite,
+                  interaction.deletedAt?.timeIntervalSince1970.isFinite ?? true,
                   interaction.updatedAt >= interaction.createdAt,
                   interaction.revision >= 0 else {
                 throw DataImportError.invalidReference("朋友圈互动 \(interaction.id) 的帖子、作者或字段无效")
@@ -1742,6 +1745,7 @@ struct DataImportService {
             body: item.body,
             createdAt: item.createdAt,
             updatedAt: item.updatedAt,
+            deletedAt: item.deletedAt,
             revision: item.revision,
             deviceID: item.deviceID
         )

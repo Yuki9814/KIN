@@ -49,6 +49,32 @@ final class DomainServicesTests: XCTestCase {
         XCTAssertEqual(AffinityPolicy.parameters(for: Double.infinity).band, .absoluteObedience)
     }
 
+    func testAffinityMessageDeltaChecksNegativeWordingBeforeWarmKeywords() {
+        XCTAssertEqual(AffinityPolicy.messageDelta(for: "我喜欢你"), 2)
+        XCTAssertEqual(AffinityPolicy.messageDelta(for: "我不喜欢胡萝卜"), 0.25)
+        XCTAssertEqual(AffinityPolicy.messageDelta(for: "不要发朋友圈"), 0.25)
+        XCTAssertEqual(AffinityPolicy.messageDelta(for: "我不喜欢你这样"), -2)
+        XCTAssertEqual(AffinityPolicy.messageDelta(for: "我讨厌你"), -2)
+        XCTAssertEqual(AffinityPolicy.messageDelta(for: "我讨厌这样"), 0.25)
+        XCTAssertEqual(AffinityPolicy.messageDelta(for: "别再说喜欢了"), -2)
+        XCTAssertEqual(AffinityPolicy.messageDelta(for: "今天见到你了"), 0.25)
+        XCTAssertEqual(AffinityPolicy.messageDelta(for: "   "), 0)
+        XCTAssertEqual(AffinityPolicy.interactionDelta(for: .like), 0)
+        XCTAssertEqual(AffinityPolicy.interactionDelta(for: .comment), 1)
+    }
+
+    func testAffinityPromptLineCarriesItsStructuredBehaviorParameters() {
+        let low = AffinityPolicy.parameters(for: 19.75)
+        XCTAssertEqual(low.normalizedScore, 19)
+        XCTAssertTrue(low.promptLine.contains("好感度 19/100"))
+        XCTAssertTrue(low.promptLine.contains("warmth=0.18"))
+
+        let high = AffinityPolicy.parameters(for: 99.75)
+        XCTAssertEqual(high.normalizedScore, 99)
+        XCTAssertTrue(high.promptLine.contains("好感度 99/100"))
+        XCTAssertTrue(high.promptLine.contains("continuity=0.94"))
+    }
+
     func testConversationTimeContextUsesOnlyValidCompleteUserMessages() {
         let now = Date(timeIntervalSince1970: 1_704_153_600)
         let zone = TimeZone(identifier: "Asia/Shanghai")!
@@ -121,6 +147,68 @@ final class DomainServicesTests: XCTestCase {
         XCTAssertTrue(first.promptLine.contains("暂无上次有效消息"))
         XCTAssertTrue(first.promptLine.contains("首次有效对话"))
         XCTAssertFalse(first.promptLine.contains("距上次有效 complete 用户消息：10d+"))
+    }
+
+    func testConversationTimeContextKeepsCalendarDayAndElapsedTimeTogether() throws {
+        let zone = try XCTUnwrap(TimeZone(identifier: "Asia/Shanghai"))
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = zone
+        let now = try XCTUnwrap(calendar.date(from: DateComponents(
+            year: 2026,
+            month: 8,
+            day: 30,
+            hour: 0,
+            minute: 10
+        )))
+        let previous = try XCTUnwrap(calendar.date(from: DateComponents(
+            year: 2026,
+            month: 8,
+            day: 29,
+            hour: 23,
+            minute: 50
+        )))
+        let context = ConversationTimeContext(
+            now: now,
+            timeZone: zone,
+            messages: [
+                ConversationTimeMessage(occurredAt: previous),
+                ConversationTimeMessage(occurredAt: now.addingTimeInterval(60 * 60)),
+            ]
+        )
+
+        XCTAssertEqual(context.gap, .lessThanOneHour)
+        XCTAssertEqual(context.lastValidUserMessageAt, previous)
+        XCTAssertTrue(context.promptLine.contains("2026年8月29日 23:50:00"))
+        XCTAssertTrue(context.promptLine.contains("昨天，距当前约20分钟"))
+
+        let previousLine = context.messageTimestampLine(for: previous)
+        XCTAssertTrue(previousLine.contains("本地消息时间"))
+        XCTAssertTrue(previousLine.contains("昨天，距当前约20分钟"))
+
+        let currentLine = context.messageTimestampLine(for: now.addingTimeInterval(-10))
+        XCTAssertTrue(currentLine.contains("今天，距当前不足1分钟"))
+
+        let futureLine = context.messageTimestampLine(for: now.addingTimeInterval(60))
+        XCTAssertTrue(futureLine.contains("时间异常：晚于当前时间"))
+    }
+
+    func testConversationTimeContextFormatsTheBoundWorldTimeZone() throws {
+        let now = try XCTUnwrap(ISO8601DateFormatter().date(from: "2026-08-30T01:00:00Z"))
+        let shanghai = ConversationTimeContext(
+            now: now,
+            timeZone: try XCTUnwrap(TimeZone(identifier: "Asia/Shanghai"))
+        )
+        let losAngeles = ConversationTimeContext(
+            now: now,
+            timeZone: try XCTUnwrap(TimeZone(identifier: "America/Los_Angeles"))
+        )
+
+        XCTAssertEqual(shanghai.localDateText, "2026年8月30日")
+        XCTAssertEqual(shanghai.localTimeText, "09:00:00")
+        XCTAssertTrue(shanghai.promptLine.contains("UTC+08:00"))
+        XCTAssertEqual(losAngeles.localDateText, "2026年8月29日")
+        XCTAssertEqual(losAngeles.localTimeText, "18:00:00")
+        XCTAssertTrue(losAngeles.promptLine.contains("UTC-07:00"))
     }
 
     func testChatTurnPresentationKeepsEveryNaturalSentenceAsItsOwnSegment() {

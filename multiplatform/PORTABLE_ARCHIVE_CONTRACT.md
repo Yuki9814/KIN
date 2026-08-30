@@ -46,7 +46,7 @@ FAILED and CANCELLED semantics. KMP itself keeps all rows.
 ## Apple compatibility mapping
 
 ArchivePayloadCodec.decodePortableOrApple accepts sanitized Apple
-AyaneDataExport schema versions 4 through 16 as a one-way input adapter:
+AyaneDataExport schema versions 4 through 17 as a one-way input adapter:
 
 - profiles (or legacy persona) become custom Role records; the stable Ayane
   profile is filtered because KMP provisions it locally.
@@ -61,13 +61,19 @@ AyaneDataExport schema versions 4 through 16 as a one-way input adapter:
 - Sanitized HTTPS provider URL/model values may be retained as display
   settings; credentials and OAuth state are never imported.
 - Apple-only evidence, summaries, Moments, groups, proactive tasks, world
-  profiles and account/device fields are ignored because KMP 0.1.4 has no
-  corresponding model.
+  profiles and account/device fields are ignored because KMP 0.1.5 has no
+  corresponding model. In schema v17, `moment_interactions.deleted_at` is a
+  sticky Apple-side tombstone; the safe-read adapter does not turn any Moments
+  interaction (deleted or live) into a KMP chat event or memory, so an import
+  cannot resurrect a deleted interaction. There is no KMP-side Moments DTO yet,
+  so this boundary does not promise a Moments round-trip.
 
 The reverse direction requires a Swift bridge that maps this canonical object
 to an AyaneDataExport envelope and supplies empty Apple-only collections. It
 is a schema conversion, not byte-for-byte or lossless round-trip
-compatibility. The reusable fixtures are
+compatibility. The reusable legacy/current fixtures are
 sharedLogic/src/commonTest/resources/fixtures/apple_ayane_data_export_v16.json
+and
+sharedLogic/src/commonTest/resources/fixtures/apple_ayane_data_export_v17.json
 and
 sharedLogic/src/commonTest/resources/fixtures/kin_portable_payload_v1.json.

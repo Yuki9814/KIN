@@ -2,7 +2,7 @@
 
 KIN 是一个公开源码的跨端 AI 关系伴侣项目。Apple 端使用 SwiftUI 与 SwiftData；Android 与 Windows 端使用 Kotlin Multiplatform/Compose。项目的默认内置角色只有绫音，角色、关系、聊天事件与长期记忆均按稳定标识隔离。
 
-当前应用版本为 `0.1.4`：Apple 构建号 `30`，Android `versionCode 4`；Windows 应用显示版本同为 `0.1.4`，仅因 jpackage 不接受主版本号 0，MSI/EXE 的原生安装器字段映射为 `1.1.4`。
+当前源码版本为 `0.1.5`：Apple 构建号 `31`，Android `versionCode 5`；Windows 应用显示版本同为 `0.1.5`，仅因 jpackage 不接受主版本号 0，MSI/EXE 的原生安装器字段映射为 `1.1.5`。
 
 仓库地址：[Yuki9814/KIN](https://github.com/Yuki9814/KIN)。源码、构建产物、签名材料、真实 provider 凭据、设备数据和本机日志不混在一起；二进制只在 GitHub Release 生成，不提交到 Git。
 
@@ -53,7 +53,7 @@ KIN 是一个公开源码的跨端 AI 关系伴侣项目。Apple 端使用 Swift
 
 Release 资产会在构建阶段检查包布局、Bundle/Application ID、Mach-O、Android 签名、Windows x64 文件头以及归档条目/解压大小上限；通过这些检查不等于商店审核、公证或正式签名。
 
-`v0.1.3` 是启用 GitHub 不可变 Release 之前保留的历史构建，不会移动标签或替换附件。当前正式下载基线从 `v0.1.4` 开始：发布任务会在上传前再次确认远端标签解析到本次构建提交，发布后再确认 GitHub 已将 Release 标记为不可变。版本标签 `v0.1.4` 与应用显示版本 `0.1.4` 一致。
+`v0.1.3` 是启用 GitHub 不可变 Release 之前保留的历史构建，不会移动标签或替换附件。正式下载基线从 `v0.1.4` 开始：发布任务会在上传前再次确认远端标签解析到本次构建提交，发布后再确认 GitHub 已将 Release 标记为不可变。当前源码为下一版本 `0.1.5`；在 `v0.1.5` 标签与 Release 实际创建前，最新正式下载仍是 `v0.1.4`。
 
 下载后在 macOS/Linux 执行：
 

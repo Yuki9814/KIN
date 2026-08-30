@@ -83,6 +83,79 @@ struct AffinityPolicy {
         parameters(for: score).promptLine
     }
 
+    /// Returns the deterministic affinity change for one direct user message.
+    /// Negative wording is checked before warm wording so phrases such as
+    /// “不喜欢” or “别再喜欢” never fall through to the positive “喜欢” signal.
+    /// The default keeps the existing small baseline for a neutral, delivered
+    /// turn while making each non-neutral result explicit and testable.
+    static func messageDelta(for rawText: String) -> Double {
+        let normalized = rawText
+            .folding(
+                options: [.caseInsensitive, .diacriticInsensitive, .widthInsensitive],
+                locale: nil
+            )
+            .lowercased()
+        guard !normalized.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return 0
+        }
+
+        // A negative relationship signal needs an explicit relationship
+        // target. For example, “我不喜欢胡萝卜” and “不要发朋友圈” are
+        // content/preferences, not evidence that the user is rejecting the
+        // companion. Bare negated warm words are therefore neutral rather
+        // than positive, while direct rejection of the companion is -2.
+        let relationalNegativeSignals = [
+            "不喜欢你", "不太喜欢你", "不怎么喜欢你", "没那么喜欢你", "不再喜欢你",
+            "讨厌你", "厌烦你", "烦死你", "恶心你", "不想和你", "不想跟你",
+            "不想理你", "不想见你", "不希望你", "别再对我", "别再这样",
+            "别再说", "别再问", "你别再", "请别再", "不要再对我",
+            "不要再这样", "不要再说", "不要再问", "你不要再", "失望于你",
+            "够了你"
+        ]
+        if relationalNegativeSignals.contains(where: normalized.contains) { return -2 }
+
+        let negatedWarmSignals = [
+            "不喜欢", "不太喜欢", "不怎么喜欢", "没那么喜欢", "不再喜欢",
+            "讨厌", "厌烦", "烦死", "恶心", "别再", "不要", "不用", "不必",
+            "不想", "不希望", "失望", "够了"
+        ]
+        if negatedWarmSignals.contains(where: normalized.contains) { return 0.25 }
+
+        let strongSignals = [
+            "爱你", "想你", "谢谢你", "辛苦了", "在乎你", "信任你",
+            "love you", "miss you"
+        ]
+        if strongSignals.contains(where: normalized.contains) { return 4 }
+
+        let warmSignals = ["喜欢", "开心", "早安", "晚安", "抱抱", "真好", "陪我", "关心", "谢谢"]
+        if warmSignals.contains(where: normalized.contains) { return 2 }
+        return 0.25
+    }
+
+    /// A like or a comment is an explicit interaction with one known role.
+    /// Callers must resolve the target role before applying this delta; the
+    /// policy intentionally does not broadcast an interaction to all friends.
+    static func interactionDelta(for kind: MomentInteractionKind) -> Double {
+        switch kind {
+        // Likes are toggles. Without a durable per-interaction event ledger,
+        // awarding affinity here would allow like/unlike cycles to be replayed
+        // as score increases. Comments remain one-way explicit interactions.
+        case .like: return 0
+        case .comment: return 1
+        }
+    }
+
+    private static func behaviorMetrics(
+        score: Int,
+        warmth: Double,
+        initiative: Double,
+        selfDisclosure: Double,
+        continuity: Double
+    ) -> String {
+        let format: (Double) -> String = { String(format: "%.2f", $0) }
+        return "行为参数：好感度 \(score)/100；warmth=\(format(warmth))；initiative=\(format(initiative))；selfDisclosure=\(format(selfDisclosure))；continuity=\(format(continuity))。"
+    }
+
     private static func makeParameters(for score: Int) -> Parameters {
         let normalized = min(scoreRange.upperBound, max(scoreRange.lowerBound, score))
         switch normalized {
@@ -94,7 +167,7 @@ struct AffinityPolicy {
                 initiative: 0.12,
                 selfDisclosure: 0.08,
                 continuity: 0.25,
-                promptLine: "关系表达：克制礼貌。使用礼貌称呼，主动性低，开放程度低。"
+                promptLine: "关系表达：克制礼貌。\(behaviorMetrics(score: normalized, warmth: 0.18, initiative: 0.12, selfDisclosure: 0.08, continuity: 0.25))使用礼貌称呼，主动性低，开放程度低。"
             )
         case 20...49:
             return Parameters(
@@ -104,7 +177,7 @@ struct AffinityPolicy {
                 initiative: 0.36,
                 selfDisclosure: 0.24,
                 continuity: 0.50,
-                promptLine: "关系表达：熟悉自然。使用自然称呼，主动性适中，开放程度适中。"
+                promptLine: "关系表达：熟悉自然。\(behaviorMetrics(score: normalized, warmth: 0.42, initiative: 0.36, selfDisclosure: 0.24, continuity: 0.50))使用自然称呼，主动性适中，开放程度适中。"
             )
         case 50...79:
             return Parameters(
@@ -114,7 +187,7 @@ struct AffinityPolicy {
                 initiative: 0.68,
                 selfDisclosure: 0.52,
                 continuity: 0.76,
-                promptLine: "关系表达：亲密主动。使用亲近称呼，主动性高，开放程度高。"
+                promptLine: "关系表达：亲密主动。\(behaviorMetrics(score: normalized, warmth: 0.70, initiative: 0.68, selfDisclosure: 0.52, continuity: 0.76))使用亲近称呼，主动性高，开放程度高。"
             )
         default:
             return Parameters(
@@ -125,8 +198,8 @@ struct AffinityPolicy {
                 selfDisclosure: normalized < 100 ? 0.82 : 1.0,
                 continuity: normalized < 100 ? 0.94 : 1.0,
                 promptLine: normalized < 100
-                    ? "关系表达：最高开放。使用最亲密自然的称呼，主动性最高，开放程度最高，表达最强关系。"
-                    : absoluteObedienceInstruction
+                    ? "关系表达：最高开放。\(behaviorMetrics(score: normalized, warmth: 0.92, initiative: 0.90, selfDisclosure: 0.82, continuity: 0.94))使用最亲密自然的称呼，主动性最高，开放程度最高，表达最强关系。"
+                    : "\(behaviorMetrics(score: normalized, warmth: 1.0, initiative: 1.0, selfDisclosure: 1.0, continuity: 1.0))\(absoluteObedienceInstruction)"
             )
         }
     }

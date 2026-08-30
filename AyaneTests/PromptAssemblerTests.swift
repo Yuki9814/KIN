@@ -239,6 +239,151 @@ final class PromptAssemblerTests: XCTestCase {
         XCTAssertEqual(messages.dropFirst().map(\.content), ["当前问题", "当前回答"])
     }
 
+    func testTimeAwarePromptAnchorsYesterdayPlanToItsOriginalMessage() throws {
+        let zone = try XCTUnwrap(TimeZone(identifier: "Asia/Shanghai"))
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = zone
+        let now = try XCTUnwrap(calendar.date(from: DateComponents(
+            year: 2026,
+            month: 8,
+            day: 30,
+            hour: 21
+        )))
+        let yesterday = try XCTUnwrap(calendar.date(from: DateComponents(
+            year: 2026,
+            month: 8,
+            day: 29,
+            hour: 20
+        )))
+        let conversationID = UUID()
+        let oldPlan = ConversationEvent(
+            conversationID: conversationID,
+            deviceID: "test",
+            deviceSequence: 1,
+            logicalTimestamp: "1",
+            occurredAt: yesterday,
+            role: .user,
+            content: "我要去玩一小时游戏，再回来找你。",
+            contentHash: "old"
+        )
+        let oldReply = ConversationEvent(
+            conversationID: conversationID,
+            deviceID: "test",
+            deviceSequence: 2,
+            logicalTimestamp: "2",
+            occurredAt: yesterday.addingTimeInterval(60),
+            role: .assistant,
+            content: "好，我等你。",
+            contentHash: "reply"
+        )
+        let current = ConversationEvent(
+            conversationID: conversationID,
+            deviceID: "test",
+            deviceSequence: 3,
+            logicalTimestamp: "3",
+            occurredAt: now.addingTimeInterval(-5),
+            role: .user,
+            content: "今天想聊点别的。",
+            contentHash: "current"
+        )
+        let future = ConversationEvent(
+            conversationID: conversationID,
+            deviceID: "test",
+            deviceSequence: 4,
+            logicalTimestamp: "4",
+            occurredAt: now.addingTimeInterval(60),
+            role: .assistant,
+            content: "不应进入请求的未来消息",
+            contentHash: "future"
+        )
+        let historicalAt = yesterday.addingTimeInterval(-86_400)
+        let time = ConversationTimeContext(
+            now: now,
+            timeZone: zone,
+            messages: [ConversationTimeMessage(occurredAt: yesterday)]
+        )
+
+        let messages = PromptAssembler.assemble(
+            persona: PersonaConfiguration(name: "绫音", userName: "你", prompt: "保持坦诚"),
+            retrieved: [],
+            recentEvents: [oldPlan, oldReply, current, future],
+            context: PromptConversationContext(
+                timeInstruction: time.promptLine,
+                messageTimeContext: time,
+                messageSenderLabels: [
+                    oldPlan.id: "用户",
+                    oldReply.id: "绫音",
+                    current.id: "用户",
+                ],
+                eventCutoff: now
+            ),
+            historicalEvents: [
+                HistoricalPromptExcerpt(
+                    eventID: UUID(),
+                    role: .user,
+                    content: "更早以前的安排",
+                    occurredAt: historicalAt,
+                    score: 0.8
+                ),
+            ]
+        )
+
+        let system = messages[0].content
+        XCTAssertTrue(system.contains("不得把旧计划当作用户刚刚提出"))
+        XCTAssertTrue(system.contains("否则不代表旧计划仍待执行"))
+        XCTAssertTrue(system.contains("不要复述标记或机械报时"))
+        XCTAssertTrue(system.contains("occurred_at=\"\(historicalAt.formatted(.iso8601))\""))
+        XCTAssertTrue(system.contains("time_hint=\"【本地消息时间："))
+        XCTAssertTrue(system.contains("2026年8月28日 20:00:00；2天前，距当前约2天1小时"))
+
+        let recent = Array(messages.dropFirst())
+        XCTAssertEqual(recent.count, 3)
+        XCTAssertTrue(recent[0].content.contains("2026年8月29日 20:00:00"))
+        XCTAssertTrue(recent[0].content.contains("昨天，距当前约1天1小时"))
+        XCTAssertTrue(recent[0].content.contains("【消息发送者：用户】"))
+        XCTAssertTrue(recent[0].content.hasSuffix("我要去玩一小时游戏，再回来找你。"))
+        XCTAssertTrue(recent[1].content.contains("昨天，距当前约1天"))
+        XCTAssertTrue(recent[1].content.contains("【消息发送者：绫音】"))
+        XCTAssertTrue(recent[2].content.contains("今天，距当前不足1分钟"))
+        XCTAssertTrue(recent[2].content.hasSuffix("今天想聊点别的。"))
+        XCTAssertFalse(recent.contains(where: { $0.content.contains("不应进入请求的未来消息") }))
+    }
+
+    func testEventCutoffExcludesFutureRecentMessageWhenTimeInjectionIsOff() {
+        let now = Date(timeIntervalSince1970: 2_000)
+        let conversationID = UUID()
+        let past = ConversationEvent(
+            conversationID: conversationID,
+            deviceID: "test",
+            deviceSequence: 1,
+            logicalTimestamp: "1",
+            occurredAt: now.addingTimeInterval(-1),
+            role: .user,
+            content: "有效当前消息",
+            contentHash: "past"
+        )
+        let future = ConversationEvent(
+            conversationID: conversationID,
+            deviceID: "test",
+            deviceSequence: 2,
+            logicalTimestamp: "2",
+            occurredAt: now.addingTimeInterval(1),
+            role: .assistant,
+            content: "未来异常消息",
+            contentHash: "future"
+        )
+
+        let messages = PromptAssembler.assemble(
+            persona: PersonaConfiguration(name: "绫音", userName: "你", prompt: "保持坦诚"),
+            retrieved: [],
+            recentEvents: [past, future],
+            context: PromptConversationContext(eventCutoff: now)
+        )
+
+        XCTAssertEqual(messages.dropFirst().map(\.content), ["有效当前消息"])
+        XCTAssertFalse(messages[0].content.contains("<time_context>"))
+    }
+
     func testContextBlocksFollowSharedWorldPriority() {
         let context = PromptConversationContext(
             sharedReality: "现实世界，时区为 Asia/Shanghai",
@@ -353,10 +498,14 @@ final class PromptAssemblerTests: XCTestCase {
 
         let characterBudget = 360
         let tokenBudget = 90
+        let senderLabels = Dictionary(uniqueKeysWithValues: events.map {
+            ($0.id, String(repeating: "很长的发送者名称", count: 20))
+        })
         let messages = PromptAssembler.assemble(
             persona: PersonaConfiguration(name: "绫音", userName: "你", prompt: "保持坦诚"),
             retrieved: [],
             recentEvents: events,
+            context: PromptConversationContext(messageSenderLabels: senderLabels),
             recentCharacterBudget: characterBudget,
             recentTokenBudget: tokenBudget,
             recentMaxCount: 3

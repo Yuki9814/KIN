@@ -37,6 +37,44 @@ final class AppModelStickerAndGroupTests: XCTestCase {
         XCTAssertEqual(fixture.client.chatRequests, 1)
     }
 
+    func testPokeCurrentCompanionPersistsSystemEventAndContinuesWithoutUserTurn() async throws {
+        let fixture = try makeFixture(responses: ["我刚才还想告诉你一件事。"])
+        defer { fixture.defaults.removePersistentDomain(forName: fixture.suiteName) }
+
+        let context = ModelContext(fixture.bootstrap.container)
+        fixture.appModel.pokeCurrentCompanion()
+        try await waitUntil {
+            fixture.client.chatRequests == 1 && !fixture.appModel.isGenerating
+        }
+
+        let events = try events(
+            in: fixture.appModel.currentConversation.id,
+            context: context
+        )
+        let pokeEvent = try XCTUnwrap(events.first { $0.role == .system })
+        let assistantEvent = try XCTUnwrap(events.first { $0.role == .assistant })
+
+        XCTAssertEqual(
+            pokeEvent.content,
+            "你拍了拍「\(fixture.appModel.persona.name)」"
+        )
+        XCTAssertTrue(events.filter { $0.role == .user }.isEmpty)
+        XCTAssertEqual(assistantEvent.content, "我刚才还想告诉你一件事。")
+        XCTAssertEqual(assistantEvent.parentEventID, pokeEvent.id)
+        XCTAssertEqual(assistantEvent.deliveryState, .complete)
+
+        let prompt = try XCTUnwrap(fixture.client.chatMessageSnapshots.last)
+        XCTAssertEqual(prompt.last?.role, "user")
+        XCTAssertTrue(prompt.last?.content.contains("拍一拍") == true)
+        XCTAssertFalse(prompt.contains { $0.content == pokeEvent.content })
+
+        let presentation = try XCTUnwrap(
+            try context.fetch(FetchDescriptor<ChatTurnPresentationRecord>())
+                .first { $0.idempotencyKey == "assistant-reply:\(pokeEvent.id.uuidString.lowercased())" }
+        )
+        XCTAssertEqual(presentation.state, .completed)
+    }
+
     func testDirectImageAndFilePersistDurablePayloadsAndUseTextFallbacksForAI() async throws {
         let fixture = try makeFixture(responses: ["图片收到。", "文件收到。"])
         defer { fixture.defaults.removePersistentDomain(forName: fixture.suiteName) }
@@ -78,8 +116,12 @@ final class AppModelStickerAndGroupTests: XCTestCase {
         let requestContents = fixture.client.chatMessageSnapshots
             .flatMap { $0 }
             .map(\.content)
-        XCTAssertTrue(requestContents.contains("[图片]"))
-        XCTAssertTrue(requestContents.contains("[文件]"))
+        XCTAssertTrue(requestContents.contains {
+            $0.contains("【本地消息时间：") && $0.hasSuffix("[图片]")
+        })
+        XCTAssertTrue(requestContents.contains {
+            $0.contains("【本地消息时间：") && $0.hasSuffix("[文件]")
+        })
         XCTAssertFalse(requestContents.contains { $0.contains("summary.pdf") })
         XCTAssertFalse(requestContents.contains { $0.contains(fileData.base64EncodedString()) })
     }
@@ -148,6 +190,123 @@ final class AppModelStickerAndGroupTests: XCTestCase {
                 .flatMap { $0 }
                 .contains { $0.content.contains("notes.txt") }
         )
+    }
+
+    func testGroupPromptExcludesEventsOrderedAfterTheCurrentUserTurn() async throws {
+        let fixture = try makeFixture(responses: ["当前消息收到。"])
+        defer { fixture.defaults.removePersistentDomain(forName: fixture.suiteName) }
+
+        let roleID = try fixture.appModel.createCompanion(
+            name: "甲",
+            userName: "你",
+            prompt: "只回应当前消息"
+        )
+        let secondRoleID = try fixture.appModel.createCompanion(
+            name: "乙",
+            userName: "你",
+            prompt: "未被点名时保持安静"
+        )
+        let groupID = try fixture.appModel.createGroup(
+            name: "时间边界测试群",
+            participantRoleIDs: [roleID, secondRoleID]
+        )
+        fixture.appModel.openGroup(conversationID: groupID)
+
+        let context = ModelContext(fixture.bootstrap.container)
+        let currentText = "@甲 只回答现在这条消息。"
+        fixture.appModel.sendGroupMessage(currentText, conversationID: groupID)
+        let currentEvent = try XCTUnwrap(
+            try context.fetch(FetchDescriptor<ConversationEvent>()).first {
+                $0.conversationID == groupID
+                    && $0.role == .user
+                    && $0.content == currentText
+            }
+        )
+
+        let laterText = "这条稍后同步的消息绝不能进入当前请求"
+        context.insert(ConversationEvent(
+            conversationID: groupID,
+            deviceID: "later-group-fixture",
+            deviceSequence: 9_999,
+            logicalTimestamp: currentEvent.logicalTimestamp + "-later",
+            occurredAt: currentEvent.occurredAt,
+            role: .user,
+            content: laterText,
+            contentHash: ContentHasher.sha256(laterText),
+            roleID: nil
+        ))
+        try context.save()
+
+        try await waitUntil {
+            fixture.client.chatRequests == 1 && !fixture.appModel.isGeneratingGroupReply
+        }
+
+        XCTAssertFalse(
+            fixture.client.chatMessageSnapshots
+                .flatMap { $0 }
+                .contains { $0.content.contains(laterText) }
+        )
+        XCTAssertTrue(
+            fixture.client.chatMessageSnapshots
+                .flatMap { $0 }
+                .contains {
+                    $0.content.contains("【消息发送者：用户】")
+                        && $0.content.contains(currentText)
+                }
+        )
+    }
+
+    func testGroupPromptFailsClosedForConflictingDuplicateEventIDs() async throws {
+        let fixture = try makeFixture(responses: ["不应请求回复"])
+        defer { fixture.defaults.removePersistentDomain(forName: fixture.suiteName) }
+
+        let firstRoleID = try fixture.appModel.createCompanion(
+            name: "甲",
+            userName: "你",
+            prompt: "检测冲突"
+        )
+        let secondRoleID = try fixture.appModel.createCompanion(
+            name: "乙",
+            userName: "你",
+            prompt: "检测冲突"
+        )
+        let groupID = try fixture.appModel.createGroup(
+            name: "冲突测试群",
+            participantRoleIDs: [firstRoleID, secondRoleID]
+        )
+        fixture.appModel.openGroup(conversationID: groupID)
+
+        let context = ModelContext(fixture.bootstrap.container)
+        let currentText = "这条消息存在冲突副本"
+        fixture.appModel.sendGroupMessage(currentText, conversationID: groupID)
+        let currentEvent = try XCTUnwrap(
+            try context.fetch(FetchDescriptor<ConversationEvent>()).first {
+                $0.conversationID == groupID
+                    && $0.role == .user
+                    && $0.content == currentText
+            }
+        )
+        context.insert(ConversationEvent(
+            id: currentEvent.id,
+            conversationID: groupID,
+            deviceID: "conflicting-group-fixture",
+            deviceSequence: currentEvent.deviceSequence,
+            logicalTimestamp: currentEvent.logicalTimestamp,
+            occurredAt: currentEvent.occurredAt,
+            role: .user,
+            content: "冲突副本正文",
+            contentHash: ContentHasher.sha256("冲突副本正文"),
+            roleID: nil
+        ))
+        try context.save()
+
+        try await waitUntil {
+            fixture.appModel.hasIntegrityConflict
+                && !fixture.appModel.isGeneratingGroupReply
+        }
+
+        XCTAssertEqual(fixture.client.chatRequests, 0)
+        XCTAssertTrue(fixture.appModel.conflictedEventIDs.contains(currentEvent.id))
     }
 
     func testDirectAttachmentRejectsStaleConversationTarget() throws {
@@ -259,6 +418,78 @@ final class AppModelStickerAndGroupTests: XCTestCase {
         XCTAssertEqual(allAssistantEvents.count, 3)
         XCTAssertEqual(allAssistantEvents.last?.content, "群内贴图也收到啦。")
         XCTAssertEqual(fixture.client.chatRequests, 3)
+        let requestContents = fixture.client.chatMessageSnapshots.flatMap { $0 }.map(\.content)
+        for event in firstAssistantEvents {
+            let senderName = event.senderRoleID == firstRoleID ? "甲" : "乙"
+            XCTAssertTrue(requestContents.contains {
+                $0.contains("【消息发送者：\(senderName)】")
+                    && $0.contains(event.content)
+            })
+        }
+    }
+
+    func testPokeGroupCompanionTargetsOnlyTappedRoleWithoutUserOrAffinityTurn() async throws {
+        let fixture = try makeFixture(responses: ["甲继续说。"])
+        defer { fixture.defaults.removePersistentDomain(forName: fixture.suiteName) }
+
+        let firstRoleID = try fixture.appModel.createCompanion(
+            name: "甲",
+            userName: "你",
+            prompt: "自然承接群聊"
+        )
+        let secondRoleID = try fixture.appModel.createCompanion(
+            name: "乙",
+            userName: "你",
+            prompt: "保持群聊在场"
+        )
+        let groupID = try fixture.appModel.createGroup(
+            name: "拍一拍测试群",
+            participantRoleIDs: [firstRoleID, secondRoleID]
+        )
+        fixture.appModel.openGroup(conversationID: groupID)
+
+        let context = ModelContext(fixture.bootstrap.container)
+        let relationshipRowsBefore: [CompanionRelationshipRecord] = try context.fetch(
+            FetchDescriptor<CompanionRelationshipRecord>()
+        )
+        let affinityBefore = try XCTUnwrap(
+            relationshipRowsBefore.first(where: { $0.roleID == firstRoleID })
+        ).affinityScore
+        fixture.appModel.pokeGroupCompanion(
+            roleID: firstRoleID,
+            conversationID: groupID
+        )
+        try await waitUntil {
+            fixture.client.chatRequests == 1
+                && !fixture.appModel.isGeneratingGroupReply
+        }
+
+        let groupEvents = try events(in: groupID, context: context)
+        let pokeEvent = try XCTUnwrap(groupEvents.first { $0.role == .system })
+        let assistantEvent = try XCTUnwrap(groupEvents.first { $0.role == .assistant })
+
+        XCTAssertEqual(pokeEvent.content, "你拍了拍「甲」")
+        XCTAssertTrue(groupEvents.filter { $0.role == .user }.isEmpty)
+        XCTAssertEqual(assistantEvent.content, "甲继续说。")
+        XCTAssertEqual(assistantEvent.senderRoleID, firstRoleID)
+        XCTAssertEqual(assistantEvent.parentEventID, pokeEvent.id)
+        XCTAssertFalse(
+            groupEvents.contains {
+                $0.role == .assistant && $0.senderRoleID == secondRoleID
+            }
+        )
+        let relationshipRowsAfter: [CompanionRelationshipRecord] = try context.fetch(
+            FetchDescriptor<CompanionRelationshipRecord>()
+        )
+        let affinityAfter = try XCTUnwrap(
+            relationshipRowsAfter.first(where: { $0.roleID == firstRoleID })
+        ).affinityScore
+        XCTAssertEqual(affinityAfter, affinityBefore)
+
+        let prompt = try XCTUnwrap(fixture.client.chatMessageSnapshots.last)
+        XCTAssertEqual(prompt.last?.role, "user")
+        XCTAssertTrue(prompt.last?.content.contains("拍一拍") == true)
+        XCTAssertFalse(prompt.contains { $0.content == pokeEvent.content })
     }
 
     func testGroupCreatorCanRemoveMemberAndDissolveWithoutDeletingHistory() throws {

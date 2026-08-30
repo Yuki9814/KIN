@@ -36,6 +36,21 @@ final class LocalMomentCommandParserTests: XCTestCase {
         XCTAssertEqual(contentMentionsToday.scheduledAt, now)
     }
 
+    func testCreateWordingIsAnExplicitImmediatePublishInstruction() throws {
+        for instruction in [
+            "创建朋友圈",
+            "创建一条朋友圈",
+            "帮我创建朋友圈",
+            "麻烦你帮我创建一条朋友圈，写写今天的风"
+        ] {
+            let command = try XCTUnwrap(
+                LocalMomentCommandParser.parse(instruction, now: now, calendar: calendar),
+                instruction
+            )
+            XCTAssertEqual(command.scheduledAt, now, instruction)
+        }
+    }
+
     func testChineseClockAndRelativeDelayAreResolvedLocally() throws {
         let tonight = try XCTUnwrap(LocalMomentCommandParser.parse(
             "今晚八点发一条朋友圈，写写今天的心情",
@@ -68,6 +83,10 @@ final class LocalMomentCommandParserTests: XCTestCase {
         XCTAssertNil(LocalMomentCommandParser.parse("能不能发一个朋友圈？", now: now, calendar: calendar))
         XCTAssertNil(LocalMomentCommandParser.parse("可以发个朋友圈吗？", now: now, calendar: calendar))
         XCTAssertNil(LocalMomentCommandParser.parse("我不想发朋友圈", now: now, calendar: calendar))
+        XCTAssertNil(LocalMomentCommandParser.parse("不要创建朋友圈", now: now, calendar: calendar))
+        XCTAssertNil(LocalMomentCommandParser.parse("怎么创建朋友圈？", now: now, calendar: calendar))
+        XCTAssertNil(LocalMomentCommandParser.parse("我昨天创建朋友圈了", now: now, calendar: calendar))
+        XCTAssertNil(LocalMomentCommandParser.parse("能不能创建一条朋友圈？", now: now, calendar: calendar))
     }
 
     func testDeletionCommandsTargetTheLatestCompanionMoment() throws {

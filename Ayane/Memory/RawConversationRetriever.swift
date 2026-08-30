@@ -18,6 +18,7 @@ struct RawConversationRetriever: Sendable {
         let role: String
         let content: String
         let occurredAt: Date
+        let logicalTimestamp: String
         let contentHash: String
         let deliveryState: String
         let redacted: Bool
@@ -28,6 +29,7 @@ struct RawConversationRetriever: Sendable {
             role: String,
             content: String,
             occurredAt: Date = Date(),
+            logicalTimestamp: String = "",
             contentHash: String = "",
             deliveryState: String = EventDeliveryState.complete.rawValue,
             redacted: Bool = false
@@ -37,6 +39,7 @@ struct RawConversationRetriever: Sendable {
             self.role = role
             self.content = content
             self.occurredAt = occurredAt
+            self.logicalTimestamp = logicalTimestamp
             self.contentHash = contentHash
             self.deliveryState = deliveryState
             self.redacted = redacted
@@ -51,6 +54,7 @@ struct RawConversationRetriever: Sendable {
                 role: event.roleRaw,
                 content: event.content,
                 occurredAt: event.occurredAt,
+                logicalTimestamp: event.logicalTimestamp,
                 contentHash: event.contentHash,
                 deliveryState: event.deliveryStateRaw,
                 redacted: event.redacted
@@ -140,7 +144,7 @@ struct RawConversationRetriever: Sendable {
                   !recentIDs.contains(event.id),
                   !excludedSourceIDs.contains(event.id),
                   isIndexable(snapshot: event),
-                  event.occurredAt <= currentEvent.occurredAt else {
+                  occursBefore(event, currentEvent) else {
                 continue
             }
 
@@ -293,7 +297,23 @@ struct RawConversationRetriever: Sendable {
         if lhs.event.occurredAt != rhs.event.occurredAt {
             return lhs.event.occurredAt > rhs.event.occurredAt
         }
+        if lhs.event.logicalTimestamp != rhs.event.logicalTimestamp {
+            return lhs.event.logicalTimestamp > rhs.event.logicalTimestamp
+        }
         return uuidKey(lhs.event.id) < uuidKey(rhs.event.id)
+    }
+
+    /// Conversation ordering is a total order: wall-clock time alone cannot
+    /// distinguish events created in the same timestamp bucket after the turn
+    /// currently being answered.
+    private static func occursBefore(_ lhs: EventSnapshot, _ rhs: EventSnapshot) -> Bool {
+        if lhs.occurredAt != rhs.occurredAt {
+            return lhs.occurredAt < rhs.occurredAt
+        }
+        if lhs.logicalTimestamp != rhs.logicalTimestamp {
+            return lhs.logicalTimestamp < rhs.logicalTimestamp
+        }
+        return uuidKey(lhs.id) < uuidKey(rhs.id)
     }
 
     private static func normalizedHash(_ hash: String) -> String {
@@ -323,7 +343,8 @@ struct RawConversationRetriever: Sendable {
             event.redacted ? "1" : "0",
             event.contentHash,
             event.content,
-            String(event.occurredAt.timeIntervalSince1970.bitPattern, radix: 16)
+            String(event.occurredAt.timeIntervalSince1970.bitPattern, radix: 16),
+            event.logicalTimestamp
         ]
     }
 

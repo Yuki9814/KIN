@@ -225,6 +225,10 @@ enum StoreDuplicateReconciler {
     private struct MomentInteractionPlan {
         let winner: MomentInteractionRecord
         let duplicates: [MomentInteractionRecord]
+        /// The newest tombstone found in the duplicate group. This is kept as
+        /// plan data rather than mutating `winner` during preflight, because
+        /// `makePlan` is also used by read-only source canonicalization.
+        let deletedAt: Date?
     }
 
     private struct RelationshipPlan {
@@ -500,7 +504,13 @@ enum StoreDuplicateReconciler {
         let momentInteractionExports = momentInteractions
             .filter { !plannedMomentInteractionIDs.contains($0.id) }
             .map(AyaneMomentInteractionExport.init)
-            + plan.momentInteractions.map { AyaneMomentInteractionExport($0.winner) }
+            + plan.momentInteractions.map { item in
+                var export = AyaneMomentInteractionExport(item.winner)
+                if let deletedAt = item.deletedAt {
+                    export.deletedAt = deletedAt
+                }
+                return export
+            }
         let relationshipExports = relationships
             .filter { !plannedRelationshipRoles.contains($0.roleID) }
             .map(AyaneRelationshipExport.init)
@@ -1047,13 +1057,17 @@ enum StoreDuplicateReconciler {
 
         var momentInteractionCount = StoreDuplicateEntityReconcileCount()
         for item in plan.momentInteractions {
+            let changed = item.deletedAt != item.winner.deletedAt
+            if let deletedAt = item.deletedAt {
+                item.winner.deletedAt = deletedAt
+            }
             for duplicate in item.duplicates {
                 context.delete(duplicate)
             }
             momentInteractionCount = add(
                 momentInteractionCount,
                 removed: item.duplicates.count,
-                updated: 0
+                updated: changed ? 1 : 0
             )
         }
 
@@ -1259,7 +1273,9 @@ enum StoreDuplicateReconciler {
             ),
             momentInteractions: StoreDuplicateEntityReconcileCount(
                 removed: plan.momentInteractions.reduce(0) { $0 + $1.duplicates.count },
-                updated: 0
+                updated: plan.momentInteractions.reduce(0) {
+                    $0 + ($1.deletedAt != $1.winner.deletedAt ? 1 : 0)
+                }
             ),
             relationships: StoreDuplicateEntityReconcileCount(
                 removed: plan.relationships.reduce(0) { $0 + $1.duplicates.count },
@@ -1457,6 +1473,7 @@ enum StoreDuplicateReconciler {
               interaction.body.count <= 500,
               interaction.createdAt.timeIntervalSince1970.isFinite,
               interaction.updatedAt.timeIntervalSince1970.isFinite,
+              interaction.deletedAt?.timeIntervalSince1970.isFinite ?? true,
               interaction.updatedAt >= interaction.createdAt,
               interaction.revision >= 0,
               interaction.deviceID.count <= 256 else {
@@ -1477,9 +1494,14 @@ enum StoreDuplicateReconciler {
             try validateMomentInteraction(interaction)
         }
         let winner = records.max(by: momentInteractionOrdering) ?? first
+        // Keep the normal revision/date/device winner, but retain any known
+        // deletion marker on that physical row. This makes deduplication
+        // monotonic even when an older live duplicate has a larger version.
+        let newestDeletion = records.compactMap(\.deletedAt).max()
         return MomentInteractionPlan(
             winner: winner,
-            duplicates: records.filter { $0 !== winner }
+            duplicates: records.filter { $0 !== winner },
+            deletedAt: newestDeletion
         )
     }
 
@@ -2278,6 +2300,7 @@ enum StoreDuplicateReconciler {
             uuidKey(interaction.id), uuidKey(interaction.postID), interaction.kindRaw,
             interaction.actorKindRaw, interaction.actorRoleID.map(uuidKey) ?? "-",
             interaction.body, dateKey(interaction.createdAt), dateKey(interaction.updatedAt),
+            dateKey(interaction.deletedAt),
             String(interaction.revision), interaction.deviceID
         ].joined(separator: "\u{1f}")
     }

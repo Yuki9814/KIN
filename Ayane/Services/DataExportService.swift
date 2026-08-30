@@ -9,11 +9,11 @@ import UniformTypeIdentifiers
 /// API keys deliberately do not have a representation in this type: they are
 /// kept in Keychain and are never copied into an export.
 struct AyaneDataExport: Codable, Equatable, Sendable {
-    /// v16 adds profile birthdays and recurring Moments task metadata while
-    /// retaining the v11-v15 world/group/presentation/task/image additions.
+    /// v17 adds the optional deleted_at tombstone for Moments interactions
+    /// while retaining v16 profile birthdays and recurring task metadata.
     /// The singular `worldProfile` projection remains on the wire for older
     /// readers.
-    static let currentSchemaVersion = 16
+    static let currentSchemaVersion = 17
     static let readStateSchemaVersion = 10
     static let legacySchemaVersion = 4
 
@@ -61,7 +61,7 @@ struct AyaneDataExport: Codable, Equatable, Sendable {
     /// alongside `worldProfiles`; old readers can continue consuming one
     /// world without knowing the collection exists.
     var worldProfile: AyaneWorldProfileExport
-    /// All logical worlds in the snapshot. v4-v15 backups synthesize this from
+    /// All logical worlds in the snapshot. v4-v16 backups synthesize this from
     /// the singular compatibility projection during decoding.
     var worldProfiles: [AyaneWorldProfileExport]
     var groupConversations: [AyaneGroupConversationExport]
@@ -1441,7 +1441,9 @@ struct AyaneMomentPostExport: Codable, Equatable, Sendable {
 
 /// Codable projection of one durable Moments like/comment. Post, kind and
 /// actor identity are immutable merge keys; body and revision metadata remain
-/// independently mergeable.
+/// independently mergeable. `deletedAt` is an optional sticky tombstone so
+/// pre-v17 payloads remain readable without allowing a stale live copy to
+/// resurrect a removed comment.
 struct AyaneMomentInteractionExport: Codable, Equatable, Sendable {
     static let legacyEpoch = Date(timeIntervalSince1970: 0)
 
@@ -1455,6 +1457,7 @@ struct AyaneMomentInteractionExport: Codable, Equatable, Sendable {
     var body: String
     var createdAt: Date
     var updatedAt: Date
+    var deletedAt: Date?
     var revision: Int
     var deviceID: String
 
@@ -1479,6 +1482,7 @@ struct AyaneMomentInteractionExport: Codable, Equatable, Sendable {
         case body
         case createdAt = "created_at"
         case updatedAt = "updated_at"
+        case deletedAt = "deleted_at"
         case revision
         case deviceID = "device_id"
     }
@@ -1494,6 +1498,7 @@ struct AyaneMomentInteractionExport: Codable, Equatable, Sendable {
         body: String = "",
         createdAt: Date = Date(),
         updatedAt: Date = Date(),
+        deletedAt: Date? = nil,
         revision: Int = 0,
         deviceID: String = ""
     ) {
@@ -1507,6 +1512,7 @@ struct AyaneMomentInteractionExport: Codable, Equatable, Sendable {
         self.body = body
         self.createdAt = createdAt
         self.updatedAt = updatedAt
+        self.deletedAt = deletedAt
         self.revision = revision
         self.deviceID = deviceID
     }
@@ -1522,6 +1528,7 @@ struct AyaneMomentInteractionExport: Codable, Equatable, Sendable {
         body: String = "",
         createdAt: Date = Date(),
         updatedAt: Date = Date(),
+        deletedAt: Date? = nil,
         revision: Int = 0,
         deviceID: String = ""
     ) {
@@ -1535,6 +1542,7 @@ struct AyaneMomentInteractionExport: Codable, Equatable, Sendable {
         self.body = body
         self.createdAt = createdAt
         self.updatedAt = updatedAt
+        self.deletedAt = deletedAt
         self.revision = revision
         self.deviceID = deviceID
     }
@@ -1551,6 +1559,7 @@ struct AyaneMomentInteractionExport: Codable, Equatable, Sendable {
             body: record.body,
             createdAt: record.createdAt,
             updatedAt: record.updatedAt,
+            deletedAt: record.deletedAt,
             revision: record.revision,
             deviceID: record.deviceID
         )
@@ -1572,6 +1581,8 @@ struct AyaneMomentInteractionExport: Codable, Equatable, Sendable {
         body = try container.decodeIfPresent(String.self, forKey: .body) ?? ""
         createdAt = try container.decodeIfPresent(Date.self, forKey: .createdAt) ?? Self.legacyEpoch
         updatedAt = try container.decodeIfPresent(Date.self, forKey: .updatedAt) ?? createdAt
+        // Pre-tombstone exports omitted this key; omission is the live state.
+        deletedAt = try container.decodeIfPresent(Date.self, forKey: .deletedAt)
         revision = try container.decodeIfPresent(Int.self, forKey: .revision) ?? 0
         deviceID = try container.decodeIfPresent(String.self, forKey: .deviceID) ?? ""
     }
@@ -1590,6 +1601,7 @@ struct AyaneMomentInteractionExport: Codable, Equatable, Sendable {
         try container.encode(body, forKey: .body)
         try container.encode(createdAt, forKey: .createdAt)
         try container.encode(updatedAt, forKey: .updatedAt)
+        try container.encodeIfPresent(deletedAt, forKey: .deletedAt)
         try container.encode(revision, forKey: .revision)
         try container.encode(deviceID, forKey: .deviceID)
     }

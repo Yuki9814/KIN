@@ -35,6 +35,16 @@ class ArchiveCompatibilityDesktopTest {
     }
 
     @Test
+    fun appleV17MomentTombstoneFixtureCannotResurrectAsSharedCoreData() {
+        val payload = ArchivePayloadCodec.decodePortableOrApple(fixture("apple_ayane_data_export_v17.json"))
+
+        assertTrue(payload.exportId.startsWith("apple-v17-"))
+        assertEquals(listOf("hello"), payload.chatEvents.map { it.body })
+        assertTrue(payload.memories.isEmpty())
+        assertFalse(payload.chatEvents.any { it.body.contains("已删除的互动") })
+    }
+
+    @Test
     fun encryptedAppleFixtureUsesTheSamePortableWireHeader() {
         val appleJson = fixture("apple_ayane_data_export_v16.json")
         val archive = ArchiveCrypto.encrypt(

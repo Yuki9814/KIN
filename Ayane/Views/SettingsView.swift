@@ -4,6 +4,8 @@ import UniformTypeIdentifiers
 
 #if os(macOS)
 import AppKit
+#elseif os(iOS)
+import UIKit
 #endif
 
 private enum SettingsSemantic {
@@ -94,6 +96,12 @@ struct SettingsView: View {
     @State private var pendingRestoreSummary: DataImportSummary?
     @State private var showRestoreConfirmation = false
     @State private var showsAPIUsageInfo = false
+    #if os(iOS)
+    @State private var proactiveNotificationStatus:
+        ProactiveNotificationAuthorizationStatus = .notDetermined
+    @State private var proactiveNotificationMessage: String?
+    @State private var isSchedulingNotificationTest = false
+    #endif
 
     var body: some View {
         documentPresentationView
@@ -269,6 +277,37 @@ struct SettingsView: View {
                 Text(proactiveExplanation)
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                #if os(iOS)
+                Divider()
+                LabeledContent("系统通知", value: proactiveNotificationStatusText)
+                HStack {
+                    if proactiveNotificationStatus == .notDetermined {
+                        Button("允许通知") {
+                            requestProactiveNotificationAuthorization()
+                        }
+                    } else if proactiveNotificationStatus == .denied {
+                        Button("打开系统通知设置") {
+                            openSystemNotificationSettings()
+                        }
+                    }
+                    Button(
+                        isSchedulingNotificationTest
+                            ? "正在排定…"
+                            : "1 分钟后测试通知"
+                    ) {
+                        scheduleProactiveNotificationTest()
+                    }
+                    .disabled(
+                        isSchedulingNotificationTest
+                            || proactiveNotificationStatus == .denied
+                    )
+                }
+                if let proactiveNotificationMessage {
+                    Text(proactiveNotificationMessage)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                #endif
             }
 
                 Section("世界观") {
@@ -406,6 +445,9 @@ struct SettingsView: View {
         .task {
             normalizeFollowUpRange()
             normalizeConversationCareTiming()
+            #if os(iOS)
+            await refreshProactiveNotificationStatus()
+            #endif
             if mode.includesService {
                 normalizeProviderSelection()
                 loadKeyState()
@@ -563,6 +605,67 @@ struct SettingsView: View {
             : "连续聊天关怀已关闭"
         return "\(careText)。连续 20 分钟没有有效互动就视为本轮结束，这类关怀只在应用处于前台时触发，并不依赖上方的提示词时间注入。角色也会依据好感度在 3–14 天后自然联系；\(followUpText)。静默时段只延后离线主动消息。"
     }
+
+    #if os(iOS)
+    private var proactiveNotificationStatusText: String {
+        switch proactiveNotificationStatus {
+        case .notDetermined: "尚未询问"
+        case .denied: "已关闭"
+        case .authorized: "已允许"
+        case .provisional: "临时允许"
+        case .ephemeral: "本次允许"
+        }
+    }
+
+    private func refreshProactiveNotificationStatus() async {
+        proactiveNotificationStatus = await ProactiveNotificationService.shared
+            .authorizationStatus()
+    }
+
+    private func requestProactiveNotificationAuthorization() {
+        Task {
+            proactiveNotificationStatus = await ProactiveNotificationService.shared
+                .requestAuthorization()
+            proactiveNotificationMessage = proactiveNotificationStatus == .denied
+                ? "系统通知未开启；可以随时前往系统设置修改。"
+                : "系统通知已开启。"
+            if proactiveNotificationStatus != .denied {
+                appModel.processDueProactiveTasks()
+            }
+        }
+    }
+
+    private func openSystemNotificationSettings() {
+        guard let url = URL(string: UIApplication.openNotificationSettingsURLString) else {
+            return
+        }
+        UIApplication.shared.open(url)
+    }
+
+    private func scheduleProactiveNotificationTest() {
+        isSchedulingNotificationTest = true
+        proactiveNotificationMessage = nil
+        let route = ProactiveNotificationRoute(
+            taskID: UUID(),
+            roleID: appModel.currentRoleID,
+            conversationID: appModel.currentConversation.id,
+            stage: .test
+        )
+        Task {
+            let didSchedule = await ProactiveNotificationService.shared.schedule(
+                route: route,
+                title: appModel.persona.name,
+                body: "测试通知：即使 KIN 被划掉，我也还能来找你。",
+                at: Date().addingTimeInterval(60)
+            )
+            await refreshProactiveNotificationStatus()
+            isSchedulingNotificationTest = false
+            proactiveNotificationMessage = didSchedule
+                ? "已排定 1 分钟后的测试通知。现在可以划掉 KIN。"
+                : "测试通知未能排定，请检查系统通知权限。"
+        }
+    }
+    #endif
 
     private func normalizeConversationCareTiming() {
         let normalized = min(
