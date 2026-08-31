@@ -48,10 +48,11 @@ struct GroupResponseCoordinator {
         self.maximumUnmentionedResponders = max(1, min(2, maximumUnmentionedResponders))
     }
 
-    /// Returns the strict response order. Mentioned members all answer; when
-    /// there is no mention, one or two members are selected by deterministic
-    /// relevance, fit, affinity, and recent-turn penalty. Fewer than two
-    /// distinct members is not a group and yields no response.
+    /// Returns the strict legacy response order. Mentioned members all answer;
+    /// when there is no mention, one or two members are selected by deterministic
+    /// relevance, fit, affinity, and recent-turn penalty. This low-level entry
+    /// point remains stable for compatibility and tests. Message-driven call
+    /// sites use `turnPlan` below so they receive the richer V2 behavior.
     func responseOrder(
         members: [Member],
         mentionedRoleIDs: Set<UUID> = []
@@ -80,16 +81,68 @@ struct GroupResponseCoordinator {
         return selected.isEmpty ? [winner.roleID] : selected.map(\.roleID)
     }
 
-    /// Resolves @name and @role-UUID mentions, then applies the same ordering
-    /// rule. Unknown mentions are ignored and never produce an arbitrary role.
+    /// Builds a complete group-turn plan while retaining this coordinator's
+    /// token-aware mention parser. The plan records why each member was chosen,
+    /// enforces sequential generation, supports manual/list/pooled strategies,
+    /// and defaults to swapping only the active character card into the prompt.
+    func turnPlan(
+        members: [Member],
+        message: String,
+        strategy: GroupReplyStrategy = .natural,
+        promptAssemblyMode: GroupPromptAssemblyMode = .swapActiveCharacter,
+        explicitlyMentionedRoleIDs: Set<UUID> = [],
+        manuallySelectedRoleID: UUID? = nil,
+        lastSpeakerRoleID: UUID? = nil,
+        allowSelfResponses: Bool = false,
+        forceManualSpeaker: Bool = false,
+        mutedRoleIDs: Set<UUID> = [],
+        rolesThatHaveSpokenSinceUserMessage: Set<UUID> = [],
+        talkativenessByRoleID: [UUID: Double] = [:]
+    ) -> GroupTurnPlan {
+        let canonical = stableMembers(members)
+        guard canonical.count >= 2 else {
+            return GroupTurnPlan(
+                strategy: strategy,
+                promptAssemblyMode: promptAssemblyMode,
+                selections: [],
+                shouldGenerateSequentially: true,
+                wasExplicitlyDirected: false
+            )
+        }
+        let knownRoleIDs = Set(canonical.map(\.roleID))
+        let mapped = canonical.map { member in
+            GroupTurnMember(
+                coordinatorMember: member,
+                talkativeness: talkativenessByRoleID[member.roleID] ?? 0.5,
+                isMuted: mutedRoleIDs.contains(member.roleID),
+                hasSpokenSinceUserMessage: rolesThatHaveSpokenSinceUserMessage.contains(member.roleID)
+            )
+        }
+        let context = GroupTurnPlanningContext(
+            strategy: strategy,
+            promptAssemblyMode: promptAssemblyMode,
+            manuallySelectedRoleID: manuallySelectedRoleID,
+            explicitlyMentionedRoleIDs: explicitlyMentionedRoleIDs.intersection(knownRoleIDs),
+            lastSpeakerRoleID: lastSpeakerRoleID,
+            allowSelfResponses: allowSelfResponses,
+            forceManualSpeaker: forceManualSpeaker,
+            maxAutomaticResponders: maximumUnmentionedResponders
+        )
+        return GroupTurnPlanner(mentionCoordinator: self).plan(
+            members: mapped,
+            message: message,
+            context: context
+        )
+    }
+
+    /// Resolves @name, @role-UUID and @所有人 directives, then uses the V2
+    /// natural-flow planner. Existing AppModel message call sites therefore
+    /// receive the richer behavior without changing their public API.
     func responseOrder(
         members: [Member],
         message: String
     ) -> [UUID] {
-        responseOrder(
-            members: members,
-            mentionedRoleIDs: mentionedRoleIDs(in: message, members: members)
-        )
+        turnPlan(members: members, message: message).responseOrder
     }
 
     /// Uses the UI's role-ID selections when available. This is important for
@@ -101,12 +154,11 @@ struct GroupResponseCoordinator {
         message: String,
         explicitlyMentionedRoleIDs: Set<UUID> = []
     ) -> [UUID] {
-        let knownRoleIDs = Set(members.map(\.roleID))
-        let explicit = explicitlyMentionedRoleIDs.intersection(knownRoleIDs)
-        if !explicit.isEmpty {
-            return responseOrder(members: members, mentionedRoleIDs: explicit)
-        }
-        return responseOrder(members: members, message: message)
+        turnPlan(
+            members: members,
+            message: message,
+            explicitlyMentionedRoleIDs: explicitlyMentionedRoleIDs
+        ).responseOrder
     }
 
     func mentionedRoleIDs(

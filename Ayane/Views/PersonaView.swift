@@ -142,6 +142,22 @@ struct PersonaView: View {
                     .foregroundStyle(.secondary)
             }
 
+            Section("角色卡与世界书") {
+                NavigationLink {
+                    CharacterCardImportView()
+                } label: {
+                    Label(
+                        "导入 Character Card",
+                        systemImage: "person.crop.rectangle.badge.plus"
+                    )
+                    .frame(minHeight: 36)
+                }
+
+                Text("支持 Character Card V1/V2 JSON。导入前会检查永久上下文、首条消息与内嵌世界书；创建者备注只在预览中显示，不会发送给模型。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
             Section("独立世界观") {
                 Picker("绑定世界观", selection: $selectedWorldProfileID) {
                     ForEach(availableWorldProfiles, id: \.id) { world in

@@ -67,15 +67,15 @@ final class CompanionProfileService {
     /// These limits keep an accidental or imported prompt from becoming an
     /// unbounded request prefix while leaving ample room for a detailed
     /// companion specification.
-    static let nameMaximumLength = 80
-    static let userNameMaximumLength = 80
-    static let promptMaximumLength = 32_000
+    nonisolated static let nameMaximumLength = 80
+    nonisolated static let userNameMaximumLength = 80
+    nonisolated static let promptMaximumLength = 32_000
 
     /// Aliases make the validation boundary easy for UI and import callers to
     /// discover without duplicating constants.
-    static let maxNameLength = nameMaximumLength
-    static let maxUserNameLength = userNameMaximumLength
-    static let maxPromptLength = promptMaximumLength
+    nonisolated static let maxNameLength = nameMaximumLength
+    nonisolated static let maxUserNameLength = userNameMaximumLength
+    nonisolated static let maxPromptLength = promptMaximumLength
 
     static let legacyMigrationKey = SettingsKeys.personaStorageMigrationVersion
     static let legacyMigrationVersion = SettingsStore.personaStorageMigrationVersion
