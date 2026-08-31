@@ -9,10 +9,36 @@ KIN 是一个公开源码的跨端 AI 关系伴侣项目。Apple 端使用 Swift
 ## 界面预览
 
 <p align="center">
-  <img src="Ayane/Docs/kin-screenshots.jpg" alt="KIN iOS 界面预览：聊天列表、角色资料、朋友圈、个人页与设置" width="100%" />
+  <img src="Ayane/Docs/screenshots/01-chat-list.webp" alt="KIN iOS 聊天列表" width="260" />
 </p>
+<p align="center"><strong>聊天列表</strong></p>
 
-> 当前截图来自 KIN iOS 实机界面，展示聊天列表、角色关系与资料、朋友圈互动、个人中心以及长期记忆与主动消息设置等功能。
+<p align="center">
+  <img src="Ayane/Docs/screenshots/02-character-profile.webp" alt="KIN iOS 角色资料" width="260" />
+</p>
+<p align="center"><strong>角色资料与关系</strong></p>
+
+<p align="center">
+  <img src="Ayane/Docs/screenshots/03-moments.webp" alt="KIN iOS 朋友圈" width="220" />
+</p>
+<p align="center"><strong>朋友圈互动</strong></p>
+
+<p align="center">
+  <img src="Ayane/Docs/screenshots/04-me.webp" alt="KIN iOS 个人中心" width="260" />
+</p>
+<p align="center"><strong>个人中心</strong></p>
+
+<p align="center">
+  <img src="Ayane/Docs/screenshots/05-settings-chat.webp" alt="KIN iOS 聊天与主动消息设置" width="200" />
+</p>
+<p align="center"><strong>聊天与主动消息设置</strong></p>
+
+<p align="center">
+  <img src="Ayane/Docs/screenshots/06-settings-memory.webp" alt="KIN iOS 长期记忆设置" width="200" />
+</p>
+<p align="center"><strong>长期记忆设置</strong></p>
+
+> 当前截图来自 KIN iOS 实机界面。每张截图独立展示，避免合成图缩放造成的细节损失。
 
 ## 状态与边界
 
@@ -113,7 +139,7 @@ cd multiplatform
 
 ## 隐私与同步
 
-默认模式是仅本机存储。聊天、记忆和附件不会因为构建项目而上传；只有使用者主动配置 provider 或 Apple 私有 CloudKit 时才离开设备。API Key 分别存放在 Apple Keychain、Android Keystore 或 Windows DPAPI；CI 使用占位 fixture，不进行真实 provider 验证，也不打印请求、响应或环境变量。
+默认模式是仅本机存储。聊天、记忆和附件不会因为构建项目而上传；只有使用者主动配置 provider 或 Apple 私有 CloudKit 时才离开设备。API Key 分别存放在 Apple Keychain、Android Keystore 或 Windows DPAPI；CI 使用占位 fixture，不进行真实 provider 验据，也不打印请求、响应或环境变量。
 
 启用 Apple 私有同步前，请先阅读 [`CLOUDKIT_SETUP.md`](CLOUDKIT_SETUP.md)。需要填写的 Team、Bundle 与 CloudKit 容器属于使用者自己的开发环境，只放在本机签名配置中。`scripts/verify-cloudkit-readiness.sh` 是离线产物检查，不等于 schema 已部署或两台真机已经完成同步。
 
