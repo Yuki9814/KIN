@@ -63,7 +63,6 @@ struct InteractionCorePreferencesView: View {
         }
         .formStyle(.grouped)
         .navigationTitle("交互与生图")
-        .kinInlineNavigationTitle()
         .onAppear(perform: load)
         .accessibilityIdentifier("interaction-core.preferences")
     }
