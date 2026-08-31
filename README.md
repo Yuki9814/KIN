@@ -6,6 +6,14 @@ KIN 是一个公开源码的跨端 AI 关系伴侣项目。Apple 端使用 Swift
 
 仓库地址：[Yuki9814/KIN](https://github.com/Yuki9814/KIN)。源码、构建产物、签名材料、真实 provider 凭据、设备数据和本机日志不混在一起；二进制只在 GitHub Release 生成，不提交到 Git。
 
+## 界面预览
+
+<p align="center">
+  <img src="Ayane/Docs/kin-screenshots.jpg" alt="KIN iOS 界面预览：聊天列表、角色资料、朋友圈、个人页与设置" width="100%" />
+</p>
+
+> 当前截图来自 KIN iOS 实机界面，展示聊天列表、角色关系与资料、朋友圈互动、个人中心以及长期记忆与主动消息设置等功能。
+
 ## 状态与边界
 
 | 平台 | 当前交付 | 说明 |
