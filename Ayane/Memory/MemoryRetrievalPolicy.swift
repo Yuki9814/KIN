@@ -162,7 +162,7 @@ struct MemoryRetrievalPolicy: Sendable {
     func classify(_ message: String) -> ConversationMemoryIntent {
         let value = normalize(message)
         if containsAny(value, [
-            "你记得我", "关于我", "我的资料", "我是谁", "我的名字", "我的工作",
+            "你还记得我", "你记得我", "关于我", "我的资料", "我是谁", "我的名字", "我的工作",
             "my profile", "about me", "who am i"
         ]) {
             return .identity
