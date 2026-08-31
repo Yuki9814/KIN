@@ -109,7 +109,10 @@ enum LorebookStore {
         existing: [LorebookDocument],
         imported: [LorebookDocument]
     ) throws -> [LorebookDocument] {
-        var winners = Dictionary(uniqueKeysWithValues: existing.map { ($0.id, $0) })
+        var winners: [UUID: LorebookDocument] = [:]
+        for document in existing {
+            winners[document.id] = document
+        }
         for document in imported {
             winners[document.id] = document
         }
@@ -331,7 +334,7 @@ enum LorebookStore {
     private static func portableValue(_ value: Any) -> PortableJSONValue? {
         if value is NSNull { return .null }
         if let value = value as? Bool { return .bool(value) }
-        if let value = value as? NSNumber { return .number(value.doubleValue) }
+        if let value = value as? NSNumber { return .number(value.decimalValue) }
         if let value = value as? String { return .string(value) }
         if let value = value as? [Any] {
             return .array(value.compactMap(portableValue))

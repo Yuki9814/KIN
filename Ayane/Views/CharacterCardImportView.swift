@@ -38,7 +38,7 @@ struct CharacterCardImportView: View {
                     LabeledContent("当前文件", value: sourceFileName)
                 }
 
-                Text("支持 Character Card V1 与 V2 JSON。未知的 namespaced extensions 会在 V2 再导出时原样保留。")
+                Text("支持 Character Card V1 与 V2 JSON。当前会解析未知的 namespaced extensions；创建角色只保存模型可见的角色提示词。")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -82,6 +82,14 @@ struct CharacterCardImportView: View {
                                 .font(.subheadline)
                                 .foregroundStyle(.orange)
                         }
+                    }
+                }
+
+                if let blockingReason = preview.importBlockingReason {
+                    Section("无法创建") {
+                        Label(blockingReason, systemImage: "xmark.octagon")
+                            .font(.subheadline)
+                            .foregroundStyle(.red)
                     }
                 }
 
@@ -151,6 +159,7 @@ struct CharacterCardImportView: View {
     private var canImport: Bool {
         sourceData != nil
             && preview != nil
+            && preview?.importBlockingReason == nil
             && !userName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
@@ -163,7 +172,16 @@ struct CharacterCardImportView: View {
                     url.stopAccessingSecurityScopedResource()
                 }
             }
-            let data = try Data(contentsOf: url, options: [.mappedIfSafe])
+            let handle = try FileHandle(forReadingFrom: url)
+            defer { try? handle.close() }
+            let data = try handle.read(
+                upToCount: CharacterCardDocument.maximumImportBytes + 1
+            ) ?? Data()
+            guard data.count <= CharacterCardDocument.maximumImportBytes else {
+                throw CharacterCardImportError.fileTooLarge(
+                    maximumMegabytes: CharacterCardDocument.maximumImportMegabytes
+                )
+            }
             sourceData = data
             sourceFileName = url.lastPathComponent
             preview = try appModel.previewCharacterCardImport(

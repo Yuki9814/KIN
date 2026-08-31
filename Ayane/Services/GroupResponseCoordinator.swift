@@ -100,6 +100,15 @@ struct GroupResponseCoordinator {
         talkativenessByRoleID: [UUID: Double] = [:]
     ) -> GroupTurnPlan {
         let canonical = stableMembers(members)
+        guard canonical.count >= 2 else {
+            return GroupTurnPlan(
+                strategy: strategy,
+                promptAssemblyMode: promptAssemblyMode,
+                selections: [],
+                shouldGenerateSequentially: true,
+                wasExplicitlyDirected: false
+            )
+        }
         let knownRoleIDs = Set(canonical.map(\.roleID))
         let mapped = canonical.map { member in
             GroupTurnMember(

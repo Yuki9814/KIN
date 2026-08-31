@@ -4,6 +4,7 @@ enum CharacterCardImportError: LocalizedError, Equatable, Sendable {
     case invalidJSON
     case unsupportedSpecification(String)
     case missingName
+    case fileTooLarge(maximumMegabytes: Int)
 
     var errorDescription: String? {
         switch self {
@@ -13,6 +14,8 @@ enum CharacterCardImportError: LocalizedError, Equatable, Sendable {
             return "暂不支持角色卡格式“\(value)”，请先转换为 Character Card V1 或 V2。"
         case .missingName:
             return "角色卡缺少角色名。"
+        case .fileTooLarge(let maximumMegabytes):
+            return "角色卡文件过大，最大支持 \(maximumMegabytes) MB。"
         }
     }
 }
@@ -183,9 +186,7 @@ struct CharacterCardBook: Codable, Equatable, Sendable {
                 enabled: value.enabled,
                 strategy: value.constant == true ? .constant : .keyword,
                 secondaryLogic: .andAny,
-                insertionPosition: value.position == "before_char"
-                    ? .beforeCharacter
-                    : .afterCharacter,
+                insertionPosition: lorebookInsertionPosition(value.position),
                 insertionOrder: value.insertionOrder,
                 priority: value.priority ?? value.insertionOrder,
                 caseSensitive: value.caseSensitive ?? false,
@@ -207,5 +208,27 @@ struct CharacterCardBook: Codable, Equatable, Sendable {
             extensions: extensions
         )
     }
-}
 
+    private func lorebookInsertionPosition(
+        _ rawValue: String?
+    ) -> LorebookInsertionPosition {
+        switch rawValue?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased() {
+        case "before_char", "before_character":
+            return .beforeCharacter
+        case "before_example", "before_examples":
+            return .beforeExamples
+        case "after_example", "after_examples":
+            return .afterExamples
+        case "at_depth", "depth_system":
+            return .depthSystem
+        case "depth_user":
+            return .depthUser
+        case "depth_assistant":
+            return .depthAssistant
+        default:
+            return .afterCharacter
+        }
+    }
+}

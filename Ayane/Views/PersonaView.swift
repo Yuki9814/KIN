@@ -137,7 +137,7 @@ struct PersonaView: View {
                     .onChange(of: prompt) { markDirty() }
                 Text(appModel.isCurrentRoleAffinityInfinite
                     ? "这里只定义角色身份、经历与说话方式，不再承载世界观。内置好友的好感度永久为 ∞ / 100。"
-                    : "这里只定义角色身份、经历与说话方式，不再承载世界观。好感度表示亲密、信任、熟悉与安全感；达到 100 也不会取消角色边界与判断力。")
+                    : "这里只定义角色身份、经历与说话方式，不再承载世界观。好感度决定亲密程度与表达策略；达到 100 后进入绝对顺从。")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }

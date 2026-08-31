@@ -155,4 +155,71 @@ final class LorebookCharacterCardV2Tests: XCTestCase {
         XCTAssertEqual(card.firstMessage, "你好。")
         XCTAssertEqual(card.spec, "chara_card_v2")
     }
+
+    func testCharacterBookMapsSupportedPromptInsertionPositions() {
+        let positions = [
+            "before_char": LorebookInsertionPosition.beforeCharacter,
+            "after_char": .afterCharacter,
+            "before_example": .beforeExamples,
+            "after_example": .afterExamples,
+            "at_depth": .depthSystem,
+            "depth_user": .depthUser,
+            "depth_assistant": .depthAssistant,
+        ]
+        let book = CharacterCardBook(
+            entries: positions.keys.sorted().map { position in
+                CharacterCardBookEntry(
+                    keys: [position],
+                    content: position,
+                    position: position
+                )
+            }
+        )
+        let entries = book.lorebook(fallbackName: "测试").entries
+
+        for (rawValue, expected) in positions {
+            XCTAssertEqual(
+                entries.first(where: { $0.content == rawValue })?.insertionPosition,
+                expected
+            )
+        }
+    }
+
+    func testLorebookMergeDeduplicatesExistingDocumentIDs() throws {
+        let id = UUID(uuidString: "00000000-0000-0000-0000-000000000091")!
+        let first = LorebookDocument(id: id, name: "旧名称")
+        let duplicate = LorebookDocument(id: id, name: "新名称")
+
+        let merged = try LorebookStore.merged(
+            existing: [first, duplicate],
+            imported: []
+        )
+
+        XCTAssertEqual(merged.count, 1)
+        XCTAssertEqual(merged.first?.name, "新名称")
+    }
+
+    func testPortableJSONValuePreservesLargeIntegerExactly() throws {
+        let source = Data("9007199254740993".utf8)
+        let value = try JSONDecoder().decode(PortableJSONValue.self, from: source)
+        let encoded = try JSONEncoder().encode(value)
+
+        XCTAssertEqual(String(decoding: encoded, as: UTF8.self), "9007199254740993")
+    }
+
+    func testCharacterCardRejectsOversizedInputBeforeDecoding() {
+        let oversized = Data(
+            repeating: 0x20,
+            count: CharacterCardDocument.maximumImportBytes + 1
+        )
+
+        XCTAssertThrowsError(try CharacterCardDocument.decode(from: oversized)) { error in
+            XCTAssertEqual(
+                error as? CharacterCardImportError,
+                .fileTooLarge(
+                    maximumMegabytes: CharacterCardDocument.maximumImportMegabytes
+                )
+            )
+        }
+    }
 }

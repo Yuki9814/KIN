@@ -9,6 +9,24 @@ struct CharacterCardImportPreview: Equatable, Sendable {
     let embeddedLorebook: LorebookDocument?
 
     var preferredFirstMessage: String? { firstMessages.first }
+
+    var persistedPersonaPrompt: String {
+        let trimmed = resolvedPersonaPrompt
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty
+            ? "保持“\(card.name)”的角色身份、表达风格和连续性。"
+            : trimmed
+    }
+
+    var importBlockingReason: String? {
+        let persisted = UserIdentityPolicy.appendingInstruction(
+            to: persistedPersonaPrompt
+        )
+        guard persisted.count <= CompanionProfileService.maxPromptLength else {
+            return "角色提示词超过 \(CompanionProfileService.maxPromptLength) 字，需精简后才能创建。"
+        }
+        return nil
+    }
 }
 
 struct CharacterCardImportResult: Equatable, Sendable {
@@ -41,13 +59,10 @@ extension AppModel {
         worldProfileID: UUID? = nil
     ) throws -> CharacterCardImportResult {
         let preview = try previewCharacterCardImport(data: data, userName: userName)
-        let resolvedPrompt = preview.resolvedPersonaPrompt
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        let fallbackPrompt = "保持“\(preview.card.name)”的角色身份、表达风格和连续性。"
         let roleID = try createCompanion(
             name: preview.card.name,
             userName: userName,
-            prompt: resolvedPrompt.isEmpty ? fallbackPrompt : resolvedPrompt,
+            prompt: preview.persistedPersonaPrompt,
             worldProfileID: worldProfileID
         )
         return CharacterCardImportResult(roleID: roleID, preview: preview)

@@ -1,6 +1,9 @@
 import Foundation
 
 struct CharacterCardDocument: Codable, Equatable, Sendable {
+    static let maximumImportBytes = 20 * 1_024 * 1_024
+    static let maximumImportMegabytes = maximumImportBytes / 1_024 / 1_024
+
     var spec: String
     var specVersion: String
     var name: String
@@ -58,6 +61,11 @@ struct CharacterCardDocument: Codable, Equatable, Sendable {
     }
 
     static func decode(from data: Data) throws -> CharacterCardDocument {
+        guard data.count <= maximumImportBytes else {
+            throw CharacterCardImportError.fileTooLarge(
+                maximumMegabytes: maximumImportMegabytes
+            )
+        }
         let decoder = JSONDecoder()
         guard let probe = try? decoder.decode(CardProbe.self, from: data) else {
             throw CharacterCardImportError.invalidJSON
@@ -272,4 +280,3 @@ struct CharacterCardDocument: Codable, Equatable, Sendable {
         return "【\(title)】\n\(trimmed)"
     }
 }
-

@@ -3,6 +3,26 @@ import XCTest
 @testable import Ayane
 
 final class GroupTurnPlannerV2Tests: XCTestCase {
+    func testCoordinatorKeepsTwoCompanionMinimumForMessagePlanning() {
+        let onlyID = UUID(uuidString: "00000000-0000-0000-0000-000000000010")!
+        let member = GroupResponseCoordinator.Member(
+            roleID: onlyID,
+            displayName: "唯一成员",
+            order: 0,
+            topicRelevance: 1,
+            personalityFit: 1,
+            affinityScore: 100
+        )
+
+        let result = GroupResponseCoordinator().responseOrder(
+            members: [member],
+            message: "继续",
+            explicitlyMentionedRoleIDs: Set<UUID>()
+        )
+
+        XCTAssertTrue(result.isEmpty)
+    }
+
     func testPlannerHonorsMentionsAndManualControl() {
         let firstID = UUID(uuidString: "00000000-0000-0000-0000-000000000011")!
         let secondID = UUID(uuidString: "00000000-0000-0000-0000-000000000012")!
