@@ -27,8 +27,8 @@ extension GroupTurnPlanner {
             message: message,
             context: GroupTurnPlanningContext(
                 strategy: preferences.turnStrategy,
-                maxAutomaticResponders: preferences.maximumAutomaticResponders,
-                lastSpeakerRoleID: lastSpeakerRoleID
+                lastSpeakerRoleID: lastSpeakerRoleID,
+                maxAutomaticResponders: preferences.maximumAutomaticResponders
             )
         )
         return PersistedGroupTurnPlan(
