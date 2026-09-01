@@ -40,7 +40,11 @@ final class KINNotificationAppDelegate: NSObject, UIApplicationDelegate,
         _ application: UIApplication,
         didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil
     ) -> Bool {
-        UNUserNotificationCenter.current().delegate = self
+        let center = UNUserNotificationCenter.current()
+        center.delegate = self
+        center.setNotificationCategories(
+            KINSystemNotificationCategory.registeredCategories
+        )
         return true
     }
 
@@ -55,6 +59,11 @@ final class KINNotificationAppDelegate: NSObject, UIApplicationDelegate,
         _ center: UNUserNotificationCenter,
         didReceive response: UNNotificationResponse
     ) async {
+        guard KINSystemNotificationCategory.shouldOpenChat(
+            for: response.actionIdentifier
+        ) else {
+            return
+        }
         await MainActor.run {
             KINNotificationRouter.shared.receive(
                 userInfo: response.notification.request.content.userInfo
