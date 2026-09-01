@@ -755,6 +755,10 @@ final class CompanionRelationshipRecord {
     var affinityTier: Int = 0
     var affinityPolicyVersion: Int = 1
     var lastAffinityEventID: UUID?
+    /// When present, this user-selected score is authoritative for prompt and
+    /// behavior policy. The automatic score remains intact underneath so the
+    /// user can return to automatic progression without losing history.
+    var manualAffinityScore: Double?
     var dignity: Double = 0.5
     var independence: Double = 0.5
     var boundarySensitivity: Double = 0.5
@@ -788,6 +792,7 @@ final class CompanionRelationshipRecord {
         affinityTier: Int = 0,
         affinityPolicyVersion: Int = 1,
         lastAffinityEventID: UUID? = nil,
+        manualAffinityScore: Double? = nil,
         dignity: Double = 0.5,
         independence: Double = 0.5,
         boundarySensitivity: Double = 0.5,
@@ -817,6 +822,9 @@ final class CompanionRelationshipRecord {
         self.affinityTier = min(3, max(0, affinityTier))
         self.affinityPolicyVersion = max(1, affinityPolicyVersion)
         self.lastAffinityEventID = lastAffinityEventID
+        self.manualAffinityScore = manualAffinityScore.flatMap {
+            $0.isFinite ? min(100, max(0, $0)) : nil
+        }
         self.dignity = dignity
         self.independence = independence
         self.boundarySensitivity = boundarySensitivity
@@ -850,6 +858,7 @@ final class CompanionRelationshipRecord {
         affinityTier: Int = 0,
         affinityPolicyVersion: Int = 1,
         lastAffinityEventID: UUID? = nil,
+        manualAffinityScore: Double? = nil,
         dignity: Double = 0.5,
         independence: Double = 0.5,
         boundarySensitivity: Double = 0.5,
@@ -879,6 +888,9 @@ final class CompanionRelationshipRecord {
         self.affinityTier = min(3, max(0, affinityTier))
         self.affinityPolicyVersion = max(1, affinityPolicyVersion)
         self.lastAffinityEventID = lastAffinityEventID
+        self.manualAffinityScore = manualAffinityScore.flatMap {
+            $0.isFinite ? min(100, max(0, $0)) : nil
+        }
         self.dignity = dignity
         self.independence = independence
         self.boundarySensitivity = boundarySensitivity

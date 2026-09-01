@@ -216,6 +216,54 @@ final class AppModelWorldProfileTests: XCTestCase {
         XCTAssertGreaterThan(ordinaryAfter.revision, ordinaryRevision)
     }
 
+    func testManualAffinityOverridePersistsAndControlsTheRealPrompt() async throws {
+        let (defaults, suiteName) = try makeDefaults()
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let bootstrap = PersistenceController.makeContainer(inMemory: true, preferCloud: false)
+        let context = ModelContext(bootstrap.container)
+        let client = WorldPromptCapturingClient()
+        let appModel = makeAppModel(
+            bootstrap: bootstrap,
+            defaults: defaults,
+            client: client
+        )
+
+        XCTAssertTrue(appModel.effectiveAffinityScore(for: RoleScope.legacyRoleID).isInfinite)
+        XCTAssertNil(appModel.manualAffinityScore(for: RoleScope.legacyRoleID))
+
+        try appModel.setManualAffinityScore(42, for: RoleScope.legacyRoleID)
+
+        XCTAssertEqual(appModel.manualAffinityScore(for: RoleScope.legacyRoleID), 42)
+        XCTAssertEqual(appModel.effectiveAffinityScore(for: RoleScope.legacyRoleID), 42)
+        XCTAssertEqual(appModel.relationshipAffinityScore, 42)
+        XCTAssertTrue(appModel.relationshipAffinityIsManual)
+        XCTAssertFalse(appModel.isCurrentRoleAffinityInfinite)
+        let persisted = try XCTUnwrap(
+            try context.fetch(FetchDescriptor<CompanionRelationshipRecord>())
+                .first { $0.roleID == RoleScope.legacyRoleID }
+        )
+        XCTAssertEqual(persisted.manualAffinityScore, 42)
+
+        appModel.send("现在怎么说话？")
+        try await waitUntil { !appModel.isGenerating && client.systemMessages().count == 1 }
+        let manualPrompt = try XCTUnwrap(client.systemMessages().last)
+        XCTAssertTrue(manualPrompt.contains("当前有效好感度 42/100"))
+        XCTAssertTrue(manualPrompt.contains("必须执行的角色行为控制参数"))
+        XCTAssertFalse(manualPrompt.contains(AffinityPolicy.absoluteObedienceInstruction))
+
+        try appModel.clearManualAffinityScore(for: RoleScope.legacyRoleID)
+
+        XCTAssertNil(appModel.manualAffinityScore(for: RoleScope.legacyRoleID))
+        XCTAssertTrue(appModel.effectiveAffinityScore(for: RoleScope.legacyRoleID).isInfinite)
+        XCTAssertTrue(appModel.isCurrentRoleAffinityInfinite)
+        appModel.send("恢复以后呢？")
+        try await waitUntil { !appModel.isGenerating && client.systemMessages().count == 2 }
+        XCTAssertTrue(
+            try XCTUnwrap(client.systemMessages().last)
+                .contains(AffinityPolicy.absoluteObedienceInstruction)
+        )
+    }
+
     func testLegacyConversationMigrationPreservesAllDurableDataAndIsIdempotent() throws {
         let (defaults, suiteName) = try makeDefaults()
         defer { defaults.removePersistentDomain(forName: suiteName) }

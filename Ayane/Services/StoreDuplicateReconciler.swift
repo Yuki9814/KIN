@@ -1563,6 +1563,9 @@ enum StoreDuplicateReconciler {
               (0...100).contains(record.affinityScore),
               (0...3).contains(record.affinityTier),
               record.affinityPolicyVersion > 0,
+              (record.manualAffinityScore.map {
+                  $0.isFinite && (0...100).contains($0)
+              } ?? true),
               record.dignity.isFinite,
               (0...1).contains(record.dignity),
               record.independence.isFinite,

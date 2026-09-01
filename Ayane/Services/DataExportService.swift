@@ -9,11 +9,11 @@ import UniformTypeIdentifiers
 /// API keys deliberately do not have a representation in this type: they are
 /// kept in Keychain and are never copied into an export.
 struct AyaneDataExport: Codable, Equatable, Sendable {
-    /// v17 adds the optional deleted_at tombstone for Moments interactions
-    /// while retaining v16 profile birthdays and recurring task metadata.
+    /// v18 adds the optional manual affinity override while retaining v17
+    /// Moments interaction tombstones and all earlier compatibility fields.
     /// The singular `worldProfile` projection remains on the wire for older
     /// readers.
-    static let currentSchemaVersion = 17
+    static let currentSchemaVersion = 18
     static let readStateSchemaVersion = 10
     static let legacySchemaVersion = 4
 
@@ -1623,6 +1623,7 @@ struct AyaneRelationshipExport: Codable, Equatable, Sendable {
     var affinityTier: Int
     var affinityPolicyVersion: Int
     var lastAffinityEventID: UUID?
+    var manualAffinityScore: Double?
     var dignity: Double
     var independence: Double
     var boundarySensitivity: Double
@@ -1655,6 +1656,7 @@ struct AyaneRelationshipExport: Codable, Equatable, Sendable {
         case affinityTier = "affinity_tier"
         case affinityPolicyVersion = "affinity_policy_version"
         case lastAffinityEventID = "last_affinity_event_id"
+        case manualAffinityScore = "manual_affinity_score"
         case dignity
         case independence
         case boundarySensitivity = "boundary_sensitivity"
@@ -1687,6 +1689,7 @@ struct AyaneRelationshipExport: Codable, Equatable, Sendable {
             affinityTier: record.affinityTier,
             affinityPolicyVersion: record.affinityPolicyVersion,
             lastAffinityEventID: record.lastAffinityEventID,
+            manualAffinityScore: record.manualAffinityScore,
             dignity: record.dignity,
             independence: record.independence,
             boundarySensitivity: record.boundarySensitivity,
@@ -1719,6 +1722,7 @@ struct AyaneRelationshipExport: Codable, Equatable, Sendable {
         affinityTier: Int = 0,
         affinityPolicyVersion: Int = 1,
         lastAffinityEventID: UUID? = nil,
+        manualAffinityScore: Double? = nil,
         dignity: Double = 0.5,
         independence: Double = 0.5,
         boundarySensitivity: Double = 0.5,
@@ -1748,6 +1752,7 @@ struct AyaneRelationshipExport: Codable, Equatable, Sendable {
         self.affinityTier = affinityTier
         self.affinityPolicyVersion = affinityPolicyVersion
         self.lastAffinityEventID = lastAffinityEventID
+        self.manualAffinityScore = manualAffinityScore
         self.dignity = dignity
         self.independence = independence
         self.boundarySensitivity = boundarySensitivity
@@ -1790,6 +1795,10 @@ struct AyaneRelationshipExport: Codable, Equatable, Sendable {
             forKey: .affinityPolicyVersion
         ) ?? 1
         lastAffinityEventID = try container.decodeIfPresent(UUID.self, forKey: .lastAffinityEventID)
+        manualAffinityScore = try container.decodeIfPresent(
+            Double.self,
+            forKey: .manualAffinityScore
+        )
         dignity = try container.decodeIfPresent(Double.self, forKey: .dignity) ?? 0.5
         independence = try container.decodeIfPresent(Double.self, forKey: .independence) ?? 0.5
         boundarySensitivity = try container.decodeIfPresent(
@@ -1832,6 +1841,7 @@ struct AyaneRelationshipExport: Codable, Equatable, Sendable {
         try container.encode(affinityTier, forKey: .affinityTier)
         try container.encode(affinityPolicyVersion, forKey: .affinityPolicyVersion)
         try container.encodeIfPresent(lastAffinityEventID, forKey: .lastAffinityEventID)
+        try container.encodeIfPresent(manualAffinityScore, forKey: .manualAffinityScore)
         try container.encode(dignity, forKey: .dignity)
         try container.encode(independence, forKey: .independence)
         try container.encode(boundarySensitivity, forKey: .boundarySensitivity)

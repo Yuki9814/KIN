@@ -2459,6 +2459,9 @@ struct DataMergeService {
                   (0...100).contains(item.affinityScore),
                   (0...3).contains(item.affinityTier),
                   item.affinityPolicyVersion > 0,
+                  (item.manualAffinityScore.map {
+                      $0.isFinite && (0...100).contains($0)
+                  } ?? true),
                   item.policyVersion > 0,
                   item.revision >= 0,
                   item.createdAt.timeIntervalSince1970.isFinite,
@@ -2905,6 +2908,9 @@ struct DataMergeService {
                   (0...100).contains(item.affinityScore),
                   (0...3).contains(item.affinityTier),
                   item.affinityPolicyVersion > 0,
+                  (item.manualAffinityScore.map {
+                      $0.isFinite && (0...100).contains($0)
+                  } ?? true),
                   item.policyVersion > 0,
                   item.revision >= 0,
                   item.createdAt.timeIntervalSince1970.isFinite,
@@ -4597,6 +4603,7 @@ struct DataMergeService {
             String(item.forgivenessThreshold.bitPattern, radix: 16),
             String(item.affinityScore.bitPattern, radix: 16), String(item.affinityTier),
             String(item.affinityPolicyVersion), optionalUUID(item.lastAffinityEventID),
+            item.manualAffinityScore.map { String($0.bitPattern, radix: 16) } ?? "nil",
             String(item.dignity.bitPattern, radix: 16),
             String(item.independence.bitPattern, radix: 16),
             String(item.boundarySensitivity.bitPattern, radix: 16),
@@ -4750,6 +4757,7 @@ struct DataMergeService {
             affinityTier: item.affinityTier,
             affinityPolicyVersion: item.affinityPolicyVersion,
             lastAffinityEventID: item.lastAffinityEventID,
+            manualAffinityScore: item.manualAffinityScore,
             dignity: item.dignity,
             independence: item.independence,
             boundarySensitivity: item.boundarySensitivity,
@@ -5097,6 +5105,7 @@ struct DataMergeService {
         record.affinityTier = item.affinityTier
         record.affinityPolicyVersion = item.affinityPolicyVersion
         record.lastAffinityEventID = item.lastAffinityEventID
+        record.manualAffinityScore = item.manualAffinityScore
         record.dignity = item.dignity
         record.independence = item.independence
         record.boundarySensitivity = item.boundarySensitivity

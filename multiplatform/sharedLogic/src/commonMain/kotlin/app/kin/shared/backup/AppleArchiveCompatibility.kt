@@ -28,7 +28,7 @@ import kotlinx.serialization.json.jsonObject
 import kotlin.math.roundToInt
 
 /**
- * One-way compatibility reader for Apple's sanitized AyaneDataExport v17 JSON.
+ * One-way compatibility reader for Apple's sanitized AyaneDataExport v4-v18 JSON.
  *
  * Apple stores a richer SwiftData graph (evidence, summaries, moments, world
  * profiles and scheduler records) than the first KMP release. This adapter
@@ -38,11 +38,14 @@ import kotlin.math.roundToInt
  * pretending that they are represented by KMP models. The v17
  * `moment_interactions.deleted_at` field therefore remains an Apple-side
  * sticky tombstone: it is not converted into a live KMP record, and the
- * adapter cannot resurrect it during import.
+ * adapter cannot resurrect it during import. Schema v18's optional
+ * `relationships.manual_affinity_score` field is also ignored: KMP has no
+ * manual-affinity slot, so this one-way adapter uses only `affinity_score`
+ * (or the legacy tier) and does not claim to preserve the override.
  */
 object AppleArchiveCompatibility {
     private const val minAppleSchema = 4
-    private const val maxAppleSchema = 17
+    private const val maxAppleSchema = 18
     private val json = Json {
         ignoreUnknownKeys = true
         isLenient = true
@@ -88,6 +91,10 @@ object AppleArchiveCompatibility {
             ).joinToString(" ").lowercase()
             val archived = stateRaw.contains("archiv") || stateRaw.contains("retir") ||
                 relationship.string("retired_at") != null || stateRaw.contains("removed")
+            // Schema v18 adds manual_affinity_score, but RelationshipState has
+            // no field for it. Keep the automatic score/tier only; importing
+            // the override here would falsely imply that an Apple round-trip
+            // can preserve it.
             val affinity = (relationship.double("affinity_score")
                 ?: relationship.int("affinity_tier")?.times(20.0)
                 ?: 0.0).roundToInt().coerceIn(0, 100)

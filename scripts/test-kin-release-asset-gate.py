@@ -130,7 +130,7 @@ class RepositoryReleaseConfigurationTests(unittest.TestCase):
         readme = (REPOSITORY_ROOT / "README.md").read_text()
 
         self.assertEqual(project.count("MARKETING_VERSION = 0.1.5;"), 6)
-        self.assertEqual(project.count("CURRENT_PROJECT_VERSION = 31;"), 6)
+        self.assertEqual(project.count("CURRENT_PROJECT_VERSION = 37;"), 6)
         self.assertNotIn("MARKETING_VERSION = 0.1.4;", project)
         self.assertIn('.orElse("0.1.5")', gradle)
         self.assertIn("versionCode = 5", android)

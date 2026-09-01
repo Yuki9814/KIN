@@ -437,6 +437,30 @@ final class DataExportServiceTests: XCTestCase {
         XCTAssertEqual(clearedConversationIndexCount, 0)
     }
 
+    func testRelationshipExportRoundTripPreservesManualAffinityAndLegacyDefaultsToNil() throws {
+        let record = CompanionRelationshipRecord(
+            roleID: RoleScope.legacyRoleID,
+            affinityScore: 100,
+            affinityTier: 3,
+            manualAffinityScore: 42,
+            updatedAt: Date(timeIntervalSince1970: 100)
+        )
+        let encoded = try JSONEncoder().encode(AyaneRelationshipExport(record))
+        let decoded = try JSONDecoder().decode(AyaneRelationshipExport.self, from: encoded)
+        XCTAssertEqual(decoded.manualAffinityScore, 42)
+
+        var legacyObject = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: encoded) as? [String: Any]
+        )
+        legacyObject.removeValue(forKey: "manual_affinity_score")
+        let legacyData = try JSONSerialization.data(withJSONObject: legacyObject)
+        let legacyDecoded = try JSONDecoder().decode(
+            AyaneRelationshipExport.self,
+            from: legacyData
+        )
+        XCTAssertNil(legacyDecoded.manualAffinityScore)
+    }
+
     private func makeDefaults() throws -> UserDefaults {
         let suiteName = "AyaneTests.DataExport.\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))

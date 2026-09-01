@@ -366,7 +366,8 @@ struct DataImportService {
                 || version == 13
                 || version == 14
                 || version == 15
-                || version == 16 else {
+                || version == 16
+                || version == 17 else {
             throw DataImportError.unsupportedSchema(version)
         }
     }
@@ -539,7 +540,8 @@ struct DataImportService {
                 || payload.schemaVersion == 13
                 || payload.schemaVersion == 14
                 || payload.schemaVersion == 15
-                || payload.schemaVersion == 16 else {
+                || payload.schemaVersion == 16
+                || payload.schemaVersion == 17 else {
             throw DataImportError.unsupportedSchema(payload.schemaVersion)
         }
         guard !payload.conversations.isEmpty else {
@@ -691,6 +693,9 @@ struct DataImportService {
                   (0...100).contains(relationship.affinityScore),
                   (0...3).contains(relationship.affinityTier),
                   relationship.affinityPolicyVersion > 0,
+                  (relationship.manualAffinityScore.map {
+                      $0.isFinite && (0...100).contains($0)
+                  } ?? true),
                   relationship.dignity.isFinite,
                   (0...1).contains(relationship.dignity),
                   relationship.independence.isFinite,
@@ -1560,6 +1565,7 @@ struct DataImportService {
             affinityTier: item.affinityTier,
             affinityPolicyVersion: item.affinityPolicyVersion,
             lastAffinityEventID: item.lastAffinityEventID,
+            manualAffinityScore: item.manualAffinityScore,
             dignity: item.dignity,
             independence: item.independence,
             boundarySensitivity: item.boundarySensitivity,

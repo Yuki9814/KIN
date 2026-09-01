@@ -179,6 +179,8 @@ enum BuiltInCompanionCatalog {
 
         let relationships = try context.fetch(FetchDescriptor<CompanionRelationshipRecord>())
         if relationships.first(where: { $0.roleID == definition.id }) == nil {
+            // Seed only the automatic baseline. Existing rows, including a
+            // user's manual affinity override, remain untouched on later launches.
             context.insert(CompanionRelationshipRecord(
                 id: definition.relationshipID,
                 roleID: definition.id,

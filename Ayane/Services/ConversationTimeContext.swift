@@ -43,10 +43,18 @@ struct ConversationTimeContext: Equatable, Sendable {
     let timeZoneIdentifier: String
     let localDateText: String
     let localTimeText: String
+    /// Timestamp of the user event currently being answered. It can be older
+    /// than `now` when a suspended or retried generation resumes later.
+    let currentTurnOccurredAt: Date
+    let currentTurnLocalDateText: String
+    let currentLocalDayStart: Date
     let lastValidUserMessageAt: Date?
     let intervalSinceLastValidUserMessage: TimeInterval?
+    let localCalendarDayDistance: Int?
+    let crossesLocalCalendarDay: Bool
     let gap: ConversationTimeGap
     let promptLine: String
+    let turnBoundaryInstruction: String
 
     /// Whether a valid previous user event was found. The `gap` is still
     /// conservative (`10d+`) when no such event exists, while this flag keeps
@@ -61,10 +69,13 @@ struct ConversationTimeContext: Equatable, Sendable {
     init(
         now: Date = Date(),
         timeZone: TimeZone = .current,
-        messages: [ConversationTimeMessage] = []
+        messages: [ConversationTimeMessage] = [],
+        currentTurnOccurredAt: Date? = nil
     ) {
         self.now = now
         self.timeZoneIdentifier = timeZone.identifier
+        let resolvedTurnOccurredAt = currentTurnOccurredAt ?? now
+        self.currentTurnOccurredAt = resolvedTurnOccurredAt
 
         let dateFormatter = Self.makeFormatter(timeZone: timeZone)
         dateFormatter.dateFormat = "yyyy年M月d日"
@@ -72,30 +83,52 @@ struct ConversationTimeContext: Equatable, Sendable {
         timeFormatter.dateFormat = "HH:mm:ss"
         self.localDateText = dateFormatter.string(from: now)
         self.localTimeText = timeFormatter.string(from: now)
+        self.currentTurnLocalDateText = dateFormatter.string(from: resolvedTurnOccurredAt)
+        var localCalendar = Calendar(identifier: .gregorian)
+        localCalendar.timeZone = timeZone
+        self.currentLocalDayStart = localCalendar.startOfDay(for: resolvedTurnOccurredAt)
 
         let lastValid = messages
             .filter {
                 $0.role == .user
                     && $0.deliveryState == .complete
-                    && $0.occurredAt <= now
+                    && $0.occurredAt <= resolvedTurnOccurredAt
             }
             .max { lhs, rhs in lhs.occurredAt < rhs.occurredAt }?
             .occurredAt
         self.lastValidUserMessageAt = lastValid
 
-        let interval = lastValid.map { max(0, now.timeIntervalSince($0)) }
+        let interval = lastValid.map { max(0, resolvedTurnOccurredAt.timeIntervalSince($0)) }
         self.intervalSinceLastValidUserMessage = interval
+        let dayDistance = lastValid.map {
+            Self.calendarDayDistance(from: $0, to: resolvedTurnOccurredAt, timeZone: timeZone)
+        }
+        self.localCalendarDayDistance = dayDistance
+        self.crossesLocalCalendarDay = (dayDistance ?? 0) > 0
         let gap = Self.classify(interval)
         self.gap = gap
 
         let timeZoneOffset = Self.offsetText(for: timeZone, at: now)
         let previousText: String
         if let lastValid {
-            previousText = "上一次已成功发送的用户消息发生于 \(Self.localDateTimeText(for: lastValid, timeZone: timeZone))（\(Self.relativeTimeText(from: lastValid, to: now, timeZone: timeZone))；间隔分类 \(gap.rawValue)）"
+            previousText = "上一次已成功发送的用户消息发生于 \(Self.localDateTimeText(for: lastValid, timeZone: timeZone))（\(Self.relativeTimeText(from: lastValid, to: resolvedTurnOccurredAt, timeZone: timeZone))；间隔分类 \(gap.rawValue)）"
         } else {
             previousText = "暂无上次有效消息，这是首次有效对话"
         }
         self.promptLine = "时间上下文：当前日期 \(localDateText)，时间 \(localTimeText)，时区 \(timeZoneIdentifier)（\(timeZoneOffset)）；\(previousText)。"
+        if let dayDistance, dayDistance > 0 {
+            self.turnBoundaryInstruction = "跨日轮次边界：当前输入与上一条有效用户消息之间已经跨过 \(dayDistance) 个本地自然日，因此当前输入是一个新的会话阶段。除非当前用户消息明确要求‘继续’、明确引用旧内容或重新点名旧话题，否则严禁续写上一日的回答、句子、清单或未完思路。即使当前消息只有‘？’、‘嗯’、‘在吗’等短内容，也不得凭相邻历史自动承接昨天；应只回应当前消息，必要时简短询问用户现在想表达什么。昨天及更早的消息和摘要只能作为历史背景。"
+        } else {
+            self.turnBoundaryInstruction = ""
+        }
+    }
+
+    /// High-salience metadata placed immediately before the current user body.
+    /// This counteracts a model's adjacency bias after a local calendar-day
+    /// change without mutating the persisted event.
+    var currentTurnBoundaryMetadataLine: String? {
+        guard crossesLocalCalendarDay else { return nil }
+        return "【跨日新轮次：这是 \(currentTurnLocalDateText) 的新输入。除非本条明确要求继续或引用旧话题，否则不要续写上一日回答；‘？’等短消息不得自动承接昨天内容。】"
     }
 
     /// Metadata prepended to a recent provider message. The stored event body is
@@ -109,9 +142,15 @@ struct ConversationTimeContext: Equatable, Sendable {
     static func make(
         now: Date = Date(),
         timeZone: TimeZone = .current,
-        messages: [ConversationTimeMessage] = []
+        messages: [ConversationTimeMessage] = [],
+        currentTurnOccurredAt: Date? = nil
     ) -> Self {
-        Self(now: now, timeZone: timeZone, messages: messages)
+        Self(
+            now: now,
+            timeZone: timeZone,
+            messages: messages,
+            currentTurnOccurredAt: currentTurnOccurredAt
+        )
     }
 
     static func classify(_ interval: TimeInterval?) -> ConversationTimeGap {
@@ -180,6 +219,21 @@ struct ConversationTimeContext: Equatable, Sendable {
             return "\(calendarText)，距当前不足1分钟"
         }
         return "\(calendarText)，距当前约\(elapsedText(interval))"
+    }
+
+    private static func calendarDayDistance(
+        from occurredAt: Date,
+        to now: Date,
+        timeZone: TimeZone
+    ) -> Int {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = timeZone
+        let occurredDay = calendar.startOfDay(for: occurredAt)
+        let currentDay = calendar.startOfDay(for: now)
+        return max(
+            0,
+            calendar.dateComponents([.day], from: occurredDay, to: currentDay).day ?? 0
+        )
     }
 
     private static func elapsedText(_ interval: TimeInterval) -> String {

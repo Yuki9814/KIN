@@ -17,7 +17,7 @@
 
 `KINPortableArchiveV1` 的二进制头包含 magic、版本、16-byte salt、12-byte nonce，密文使用 PBKDF2-HMAC-SHA256（600000 次、256-bit key）与 AES-256-GCM；头部作为 AAD。payload 只包含角色、关系、聊天事件、长期记忆、应用显示设置和附件元数据/内容，不包含 API key、OAuth、device ID 或派生索引。解密、校验和 SQLite 导入均在写入前验证；重复 `exportId`、错误密码、篡改、记录冲突都会失败，导入使用 SQLite transaction，附件失败会清理本次写入。
 
-兼容边界是显式单向的：ArchivePayloadCodec.decodePortableOrApple 可读取 Apple AyaneDataExport schema v4–v17 的脱敏 JSON，并把 profiles、relationships、events、memories、tombstones 与事件内嵌附件转换为 KMP core；Apple 专属 evidence、summaries、Moments、群聊、主动任务、OAuth、用户资料和 world profile 会被忽略。v17 的 `moment_interactions.deleted_at` 是 Apple 侧黏性删除墓碑；KMP 当前没有 Moments DTO，因此安全读入时不会把任何 Moments 互动（包括已删除互动）伪装成聊天或记忆记录，避免删除状态被复活，也不宣称 Moments 双向 round-trip。KMP 导出的 canonical KINPortableArchivePayloadV1 不是 Apple AyaneDataExport JSON，KMP→Swift 的同构转换需由 Swift 侧按本节 schema/fixture 实现，当前不宣称双向无损互导。
+兼容边界是显式单向的：ArchivePayloadCodec.decodePortableOrApple 可读取 Apple AyaneDataExport schema v4–v18 的脱敏 JSON，并把 profiles、relationships、events、memories、tombstones 与事件内嵌附件转换为 KMP core；Apple 专属 evidence、summaries、Moments、群聊、主动任务、OAuth、用户资料和 world profile 会被忽略。v18 的 `relationships.manual_affinity_score` 是可选字段，但 KMP 当前的 RelationshipState 没有手动好感度字段，因此安全读入时会忽略它，只使用 `affinity_score`（或旧版 tier），不宣称该值可在 Apple round-trip 中保留。v17 的 `moment_interactions.deleted_at` 是 Apple 侧黏性删除墓碑；KMP 当前没有 Moments DTO，因此安全读入时不会把任何 Moments 互动（包括已删除互动）伪装成聊天或记忆记录，避免删除状态被复活，也不宣称 Moments 双向 round-trip。KMP 导出的 canonical KINPortableArchivePayloadV1 不是 Apple AyaneDataExport JSON，KMP→Swift 的同构转换需由 Swift 侧按本节 schema/fixture 实现，当前不宣称双向无损互导。
 
 ## 首版边界
 

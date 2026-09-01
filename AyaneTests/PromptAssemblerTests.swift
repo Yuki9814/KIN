@@ -315,7 +315,8 @@ final class PromptAssemblerTests: XCTestCase {
                     oldReply.id: "绫音",
                     current.id: "用户",
                 ],
-                eventCutoff: now
+                eventCutoff: now,
+                currentUserEventID: current.id
             ),
             historicalEvents: [
                 HistoricalPromptExcerpt(
@@ -332,20 +333,23 @@ final class PromptAssemblerTests: XCTestCase {
         XCTAssertTrue(system.contains("不得把旧计划当作用户刚刚提出"))
         XCTAssertTrue(system.contains("否则不代表旧计划仍待执行"))
         XCTAssertTrue(system.contains("不要复述标记或机械报时"))
+        XCTAssertTrue(system.contains("<current_turn_boundary>"))
+        XCTAssertTrue(system.contains("严禁续写上一日的回答"))
+        XCTAssertTrue(system.contains("<previous_phase_transcript>"))
+        XCTAssertTrue(system.contains("<past_message role=\"user\""))
+        XCTAssertTrue(system.contains("我要去玩一小时游戏，再回来找你。"))
+        XCTAssertTrue(system.contains("好，我等你。"))
         XCTAssertTrue(system.contains("occurred_at=\"\(historicalAt.formatted(.iso8601))\""))
         XCTAssertTrue(system.contains("time_hint=\"【本地消息时间："))
         XCTAssertTrue(system.contains("2026年8月28日 20:00:00；2天前，距当前约2天1小时"))
 
         let recent = Array(messages.dropFirst())
-        XCTAssertEqual(recent.count, 3)
-        XCTAssertTrue(recent[0].content.contains("2026年8月29日 20:00:00"))
-        XCTAssertTrue(recent[0].content.contains("昨天，距当前约1天1小时"))
-        XCTAssertTrue(recent[0].content.contains("【消息发送者：用户】"))
-        XCTAssertTrue(recent[0].content.hasSuffix("我要去玩一小时游戏，再回来找你。"))
-        XCTAssertTrue(recent[1].content.contains("昨天，距当前约1天"))
-        XCTAssertTrue(recent[1].content.contains("【消息发送者：绫音】"))
-        XCTAssertTrue(recent[2].content.contains("今天，距当前不足1分钟"))
-        XCTAssertTrue(recent[2].content.hasSuffix("今天想聊点别的。"))
+        XCTAssertEqual(recent.count, 1)
+        XCTAssertTrue(recent[0].content.contains("今天，距当前不足1分钟"))
+        XCTAssertTrue(recent[0].content.contains("【跨日新轮次："))
+        XCTAssertTrue(recent[0].content.contains("‘？’等短消息不得自动承接昨天内容"))
+        XCTAssertTrue(recent[0].content.hasSuffix("今天想聊点别的。"))
+        XCTAssertFalse(recent[0].content.contains("我要去玩一小时游戏"))
         XCTAssertFalse(recent.contains(where: { $0.content.contains("不应进入请求的未来消息") }))
     }
 
@@ -382,6 +386,191 @@ final class PromptAssemblerTests: XCTestCase {
 
         XCTAssertEqual(messages.dropFirst().map(\.content), ["有效当前消息"])
         XCTAssertFalse(messages[0].content.contains("<time_context>"))
+    }
+
+    func testCrossDayQuestionStartsNewActivePhaseInsteadOfContinuingYesterday() throws {
+        let zone = try XCTUnwrap(TimeZone(identifier: "Asia/Shanghai"))
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = zone
+        let yesterday = try XCTUnwrap(calendar.date(from: DateComponents(
+            year: 2026, month: 9, day: 1, hour: 23, minute: 50
+        )))
+        let now = try XCTUnwrap(calendar.date(from: DateComponents(
+            year: 2026, month: 9, day: 2, hour: 0, minute: 10
+        )))
+        let conversationID = UUID()
+        let oldQuestion = ConversationEvent(
+            conversationID: conversationID,
+            deviceID: "test",
+            deviceSequence: 1,
+            logicalTimestamp: "1",
+            occurredAt: yesterday,
+            role: .user,
+            content: "?",
+            contentHash: "old-question"
+        )
+        let oldReply = ConversationEvent(
+            conversationID: conversationID,
+            deviceID: "test",
+            deviceSequence: 2,
+            logicalTimestamp: "2",
+            occurredAt: yesterday.addingTimeInterval(60),
+            role: .assistant,
+            content: "这是昨天尚未结束的一大段回复。",
+            contentHash: "old-reply"
+        )
+        let currentQuestion = ConversationEvent(
+            conversationID: conversationID,
+            deviceID: "test",
+            deviceSequence: 3,
+            logicalTimestamp: "3",
+            occurredAt: now,
+            role: .user,
+            content: "?",
+            contentHash: "current-question"
+        )
+        let time = ConversationTimeContext(
+            now: now,
+            timeZone: zone,
+            messages: [ConversationTimeMessage(occurredAt: yesterday)]
+        )
+
+        let messages = PromptAssembler.assemble(
+            persona: PersonaConfiguration(name: "绫音", userName: "主人", prompt: "自然回应"),
+            retrieved: [],
+            recentEvents: [oldQuestion, oldReply, currentQuestion],
+            context: PromptConversationContext(
+                timeInstruction: "",
+                messageTimeContext: time,
+                includeMessageTimeMetadata: false,
+                eventCutoff: now,
+                currentUserEventID: currentQuestion.id
+            )
+        )
+
+        XCTAssertFalse(messages[0].content.contains("<time_context>"))
+        XCTAssertTrue(messages[0].content.contains("<current_turn_boundary>"))
+        XCTAssertTrue(messages[0].content.contains("这是昨天尚未结束的一大段回复。"))
+        XCTAssertEqual(messages.dropFirst().map(\.role), ["user"])
+        XCTAssertEqual(messages.dropFirst().count, 1)
+        XCTAssertTrue(messages[1].content.contains("【跨日新轮次："))
+        XCTAssertTrue(messages[1].content.hasSuffix("?"))
+        XCTAssertFalse(messages[1].content.contains("昨天尚未结束"))
+    }
+
+    func testDelayedCrossMidnightAssemblyAlwaysKeepsCurrentUserEvent() throws {
+        let zone = try XCTUnwrap(TimeZone(identifier: "Asia/Shanghai"))
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = zone
+        let previousDay = try XCTUnwrap(calendar.date(from: DateComponents(
+            year: 2026, month: 8, day: 31, hour: 23, minute: 50
+        )))
+        let currentTurn = try XCTUnwrap(calendar.date(from: DateComponents(
+            year: 2026, month: 9, day: 1, hour: 23, minute: 59
+        )))
+        let resumedAt = try XCTUnwrap(calendar.date(from: DateComponents(
+            year: 2026, month: 9, day: 2, hour: 0, minute: 1
+        )))
+        let conversationID = UUID()
+        let previous = ConversationEvent(
+            conversationID: conversationID,
+            deviceID: "test",
+            deviceSequence: 1,
+            logicalTimestamp: "1",
+            occurredAt: previousDay,
+            role: .assistant,
+            content: "更早阶段回复",
+            contentHash: "previous"
+        )
+        let current = ConversationEvent(
+            conversationID: conversationID,
+            deviceID: "test",
+            deviceSequence: 2,
+            logicalTimestamp: "2",
+            occurredAt: currentTurn,
+            role: .user,
+            content: "当前消息不能丢",
+            contentHash: "current"
+        )
+        let time = ConversationTimeContext(
+            now: resumedAt,
+            timeZone: zone,
+            messages: [ConversationTimeMessage(occurredAt: previousDay)],
+            currentTurnOccurredAt: currentTurn
+        )
+
+        let messages = PromptAssembler.assemble(
+            persona: PersonaConfiguration(name: "绫音", userName: "主人", prompt: "自然回应"),
+            retrieved: [],
+            recentEvents: [previous, current],
+            context: PromptConversationContext(
+                messageTimeContext: time,
+                eventCutoff: currentTurn,
+                currentUserEventID: current.id
+            )
+        )
+
+        XCTAssertTrue(time.crossesLocalCalendarDay)
+        XCTAssertEqual(time.currentTurnLocalDateText, "2026年9月1日")
+        XCTAssertEqual(messages.dropFirst().map(\.role), ["user"])
+        XCTAssertTrue(messages[1].content.hasSuffix("当前消息不能丢"))
+        XCTAssertFalse(messages[0].content.contains("当前消息不能丢"))
+    }
+
+    func testPreviousPhaseTranscriptStaysInsideFinalEscapedBudget() throws {
+        let zone = try XCTUnwrap(TimeZone(identifier: "Asia/Shanghai"))
+        let now = Date(timeIntervalSince1970: 1_788_278_400)
+        let old = now.addingTimeInterval(-86_400)
+        let conversationID = UUID()
+        let past = ConversationEvent(
+            conversationID: conversationID,
+            deviceID: "test",
+            deviceSequence: 1,
+            logicalTimestamp: "1",
+            occurredAt: old,
+            role: .assistant,
+            content: String(repeating: "<&", count: 8_000),
+            contentHash: "escaped"
+        )
+        let current = ConversationEvent(
+            conversationID: conversationID,
+            deviceID: "test",
+            deviceSequence: 2,
+            logicalTimestamp: "2",
+            occurredAt: now,
+            role: .user,
+            content: "?",
+            contentHash: "current"
+        )
+        let time = ConversationTimeContext(
+            now: now,
+            timeZone: zone,
+            messages: [ConversationTimeMessage(occurredAt: old)],
+            currentTurnOccurredAt: now
+        )
+        let system = PromptAssembler.assemble(
+            persona: PersonaConfiguration(name: "绫音", userName: "主人", prompt: "自然回应"),
+            retrieved: [],
+            recentEvents: [past, current],
+            context: PromptConversationContext(
+                messageTimeContext: time,
+                eventCutoff: now,
+                currentUserEventID: current.id
+            )
+        )[0].content
+
+        let start = try XCTUnwrap(system.range(of: "<previous_phase_transcript>"))
+        let end = try XCTUnwrap(system.range(
+            of: "</previous_phase_transcript>",
+            range: start.upperBound..<system.endIndex
+        ))
+        let rendered = String(system[start.upperBound..<end.lowerBound])
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        XCTAssertLessThanOrEqual(rendered.count, PromptAssembler.historicalCharacterBudget)
+        XCTAssertLessThanOrEqual(
+            MemoryTokenizer.tokenCount(of: rendered),
+            PromptAssembler.historicalTokenBudget
+        )
     }
 
     func testContextBlocksFollowSharedWorldPriority() {
