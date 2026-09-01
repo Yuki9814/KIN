@@ -100,6 +100,15 @@ enum ProactiveNotificationAuthorizationStatus: String, CaseIterable, Sendable {
     case ephemeral
 }
 
+/// Stable identifiers for KIN's native iOS chat notification type.
+///
+/// Keep these values stable because pending notifications may outlive the
+/// application process and system notification settings are keyed by them.
+enum KINSystemNotificationCategory {
+    static let chatMessageIdentifier = "kin.chat-message"
+    static let openChatActionIdentifier = "kin.open-chat"
+}
+
 /// The durable routing information carried by a proactive notification.
 ///
 /// Notification request identifiers are intentionally derived only from the
@@ -215,6 +224,29 @@ struct ProactiveNotificationRoute: Codable, Equatable, Sendable {
 #if os(iOS)
 import UserNotifications
 
+extension KINSystemNotificationCategory {
+    static var registeredCategories: Set<UNNotificationCategory> {
+        let openChatAction = UNNotificationAction(
+            identifier: openChatActionIdentifier,
+            title: "打开聊天",
+            options: [.foreground]
+        )
+        let chatMessageCategory = UNNotificationCategory(
+            identifier: chatMessageIdentifier,
+            actions: [openChatAction],
+            intentIdentifiers: [],
+            hiddenPreviewsBodyPlaceholder: "收到一条新消息",
+            options: []
+        )
+        return [chatMessageCategory]
+    }
+
+    static func shouldOpenChat(for actionIdentifier: String) -> Bool {
+        actionIdentifier == UNNotificationDefaultActionIdentifier
+            || actionIdentifier == openChatActionIdentifier
+    }
+}
+
 actor ProactiveNotificationService {
     static let shared = ProactiveNotificationService()
 
@@ -250,7 +282,9 @@ actor ProactiveNotificationService {
             body: body,
             at: date,
             userInfo: [:],
-            threadIdentifier: nil
+            threadIdentifier: nil,
+            categoryIdentifier: nil,
+            targetContentIdentifier: nil
         )
     }
 
@@ -267,13 +301,16 @@ actor ProactiveNotificationService {
         // `requestIdentifier` is route-stable, so adding this request again
         // updates the existing pending request instead of creating a second
         // notification for the same task/stage.
-        await schedule(
+        let conversationIdentifier = route.conversationID.uuidString.lowercased()
+        return await schedule(
             identifier: route.requestIdentifier,
             title: title,
             body: body,
             at: date,
             userInfo: route.userInfo,
-            threadIdentifier: route.conversationID.uuidString.lowercased()
+            threadIdentifier: conversationIdentifier,
+            categoryIdentifier: KINSystemNotificationCategory.chatMessageIdentifier,
+            targetContentIdentifier: "conversation:\(conversationIdentifier)"
         )
     }
 
@@ -313,7 +350,9 @@ actor ProactiveNotificationService {
         body: String,
         at date: Date,
         userInfo: [AnyHashable: Any],
-        threadIdentifier: String?
+        threadIdentifier: String?,
+        categoryIdentifier: String?,
+        targetContentIdentifier: String?
     ) async -> Bool {
         let center = UNUserNotificationCenter.current()
         // Scheduling is an explicit replacement: a fresh request for this
@@ -341,8 +380,15 @@ actor ProactiveNotificationService {
         content.body = body
         content.userInfo = userInfo
         content.sound = .default
+        content.interruptionLevel = .active
         if let threadIdentifier {
             content.threadIdentifier = threadIdentifier
+        }
+        if let categoryIdentifier {
+            content.categoryIdentifier = categoryIdentifier
+        }
+        if let targetContentIdentifier {
+            content.targetContentIdentifier = targetContentIdentifier
         }
         let interval = max(1, date.timeIntervalSinceNow)
         let request = UNNotificationRequest(
