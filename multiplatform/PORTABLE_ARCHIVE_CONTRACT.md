@@ -46,12 +46,16 @@ FAILED and CANCELLED semantics. KMP itself keeps all rows.
 ## Apple compatibility mapping
 
 ArchivePayloadCodec.decodePortableOrApple accepts sanitized Apple
-AyaneDataExport schema versions 4 through 17 as a one-way input adapter:
+AyaneDataExport schema versions 4 through 18 as a one-way input adapter:
 
 - profiles (or legacy persona) become custom Role records; the stable Ayane
   profile is filtered because KMP provisions it locally.
 - relationships uses affinity_score (or the legacy tier) and maps to the KMP
-  stage thresholds.
+  stage thresholds. Schema v18 may additionally contain the optional
+  `manual_affinity_score` and `manual_affinity_updated_at`; KMP's
+  RelationshipState has no manual-affinity stream, so the adapter safely
+  ignores those values and does not claim to preserve them for an Apple
+  round-trip.
 - events become append-only MESSAGE records. role/role_raw, delivery state,
   parent event and ISO-8601 timestamps are retained.
 - Base64 image_data and file_data become private hashed attachment
@@ -71,7 +75,8 @@ AyaneDataExport schema versions 4 through 17 as a one-way input adapter:
 The reverse direction requires a Swift bridge that maps this canonical object
 to an AyaneDataExport envelope and supplies empty Apple-only collections. It
 is a schema conversion, not byte-for-byte or lossless round-trip
-compatibility. The reusable legacy/current fixtures are
+compatibility; in particular, the v18 manual affinity override is not
+restored by a KMP import/export cycle. The reusable legacy/current fixtures are
 sharedLogic/src/commonTest/resources/fixtures/apple_ayane_data_export_v16.json
 and
 sharedLogic/src/commonTest/resources/fixtures/apple_ayane_data_export_v17.json

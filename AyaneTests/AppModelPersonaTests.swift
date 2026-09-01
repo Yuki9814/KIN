@@ -191,7 +191,7 @@ final class AppModelPersonaTests: XCTestCase {
 
         let oldPlanText = "我要去玩一小时游戏，再回来找你。"
         let storeContext = ModelContext(bootstrap.container)
-        storeContext.insert(ConversationEvent(
+        let oldPlan = ConversationEvent(
             conversationID: appModel.currentConversation.id,
             deviceID: "seed-device",
             deviceSequence: 900,
@@ -200,6 +200,27 @@ final class AppModelPersonaTests: XCTestCase {
             role: .user,
             content: oldPlanText,
             contentHash: "seed-yesterday-plan",
+            roleID: appModel.currentRoleID
+        )
+        storeContext.insert(oldPlan)
+        storeContext.insert(MemorySummaryRecord(
+            conversationID: appModel.currentConversation.id,
+            scope: "session",
+            content: "过时的会话摘要不得进入本轮提示。",
+            firstEventID: oldPlan.id,
+            lastEventID: oldPlan.id,
+            coveredEventCount: 1,
+            extractorID: "legacy-session",
+            roleID: appModel.currentRoleID
+        ))
+        storeContext.insert(MemorySummaryRecord(
+            conversationID: appModel.currentConversation.id,
+            scope: "rolling",
+            content: "有效滚动摘要只作为过去背景。",
+            firstEventID: oldPlan.id,
+            lastEventID: oldPlan.id,
+            coveredEventCount: 1,
+            extractorID: "rolling",
             roleID: appModel.currentRoleID
         ))
         try storeContext.save()
@@ -212,15 +233,64 @@ final class AppModelPersonaTests: XCTestCase {
         let system = try XCTUnwrap(captured.first(where: { $0.role == "system" }))
         XCTAssertTrue(system.content.contains("不得把旧计划当作用户刚刚提出"))
         XCTAssertTrue(system.content.contains("上一次已成功发送的用户消息发生于"))
+        XCTAssertTrue(system.content.contains("<current_turn_boundary>"))
+        XCTAssertTrue(system.content.contains("严禁续写上一日的回答"))
+        XCTAssertTrue(system.content.contains("<previous_phase_transcript>"))
+        XCTAssertTrue(system.content.contains(oldPlanText))
+        XCTAssertTrue(system.content.contains("有效滚动摘要只作为过去背景。"))
+        XCTAssertFalse(system.content.contains("过时的会话摘要不得进入本轮提示。"))
 
         let userMessages = captured.filter { $0.role == "user" }
-        let oldPlan = try XCTUnwrap(userMessages.first(where: { $0.content.contains(oldPlanText) }))
-        XCTAssertTrue(oldPlan.content.contains("【本地消息时间："))
-        XCTAssertTrue(oldPlan.content.contains("距当前约1天"))
+        XCTAssertFalse(userMessages.contains(where: { $0.content.contains(oldPlanText) }))
 
         let current = try XCTUnwrap(userMessages.first(where: { $0.content.contains("今天想聊点别的。") }))
         XCTAssertTrue(current.content.contains("【本地消息时间："))
         XCTAssertTrue(current.content.contains("今天，距当前不足1分钟"))
+        XCTAssertTrue(current.content.contains("【跨日新轮次："))
+    }
+
+    func testFirstUserTurnAfterYesterdayAssistantStartsNewActivePhase() async throws {
+        let (defaults, suiteName) = try makeDefaults(configureProvider: true)
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        defaults.set(false, forKey: SettingsKeys.timeInjectionEnabled)
+        let bootstrap = PersistenceController.makeContainer(inMemory: true, preferCloud: false)
+        let client = PersonaCapturingAIClient()
+        let appModel = makeAppModel(
+            bootstrap: bootstrap,
+            defaults: defaults,
+            client: client
+        )
+
+        let yesterdayReply = "这是昨天角色主动发出的消息，不应在今天继续续写。"
+        let storeContext = ModelContext(bootstrap.container)
+        storeContext.insert(ConversationEvent(
+            conversationID: appModel.currentConversation.id,
+            deviceID: "assistant-only-seed",
+            deviceSequence: 1,
+            logicalTimestamp: "assistant-only-yesterday",
+            occurredAt: Date().addingTimeInterval(-26 * 60 * 60),
+            role: .assistant,
+            content: yesterdayReply,
+            contentHash: "assistant-only-yesterday",
+            roleID: appModel.currentRoleID
+        ))
+        try storeContext.save()
+        appModel.refreshFromStore(force: true)
+
+        appModel.send("？")
+        try await waitUntil {
+            !appModel.isGenerating && client.capturedChatMessages() != nil
+        }
+
+        let captured = try XCTUnwrap(client.capturedChatMessages())
+        let system = try XCTUnwrap(captured.first(where: { $0.role == "system" }))
+        XCTAssertFalse(system.content.contains("<time_context>"))
+        XCTAssertTrue(system.content.contains("<current_turn_boundary>"))
+        XCTAssertTrue(system.content.contains(yesterdayReply))
+        let activeMessages = captured.filter { $0.role == "user" || $0.role == "assistant" }
+        XCTAssertEqual(activeMessages.map(\.role), ["user"])
+        XCTAssertTrue(activeMessages[0].content.contains("【跨日新轮次："))
+        XCTAssertTrue(activeMessages[0].content.hasSuffix("？"))
     }
 
     func testTimeContextFindsPreviousUserBeyondVisibleMessageWindow() async throws {

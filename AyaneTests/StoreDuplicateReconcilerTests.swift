@@ -55,6 +55,31 @@ final class StoreDuplicateReconcilerTests: XCTestCase {
         )
     }
 
+    private func makeRelationship(
+        id relationshipID: UUID,
+        roleID: UUID,
+        affinityScore: Double,
+        manualAffinityScore: Double?,
+        manualAffinityUpdatedAt: Date?,
+        updatedAt: Date,
+        revision: Int,
+        deviceID: String
+    ) -> CompanionRelationshipRecord {
+        CompanionRelationshipRecord(
+            id: relationshipID,
+            roleID: roleID,
+            state: .accepted,
+            affinityScore: affinityScore,
+            affinityTier: 1,
+            manualAffinityScore: manualAffinityScore,
+            manualAffinityUpdatedAt: manualAffinityUpdatedAt,
+            createdAt: date(0),
+            updatedAt: updatedAt,
+            revision: revision,
+            deviceID: deviceID
+        )
+    }
+
     private func makeEvent(
         id eventID: UUID,
         conversationID: UUID,
@@ -503,6 +528,78 @@ final class StoreDuplicateReconcilerTests: XCTestCase {
         XCTAssertEqual(profiles.count, 1)
         XCTAssertEqual(profiles.first?.id, roleID)
         XCTAssertEqual(profiles.first?.name, "独立角色")
+    }
+
+    func testRelationshipDuplicatesKeepLatestManualAffinityStreamIndependentOfRowWinner() throws {
+        let context = makeContext()
+        let roleID = id("00000000-0000-0000-0000-000000001331")
+        let rowWinner = makeRelationship(
+            id: id("00000000-0000-0000-0000-000000001332"),
+            roleID: roleID,
+            affinityScore: 12,
+            manualAffinityScore: 42,
+            manualAffinityUpdatedAt: date(100),
+            updatedAt: date(300),
+            revision: 9,
+            deviceID: "row-winner"
+        )
+        let manualWinner = makeRelationship(
+            id: id("00000000-0000-0000-0000-000000001333"),
+            roleID: roleID,
+            affinityScore: 98,
+            manualAffinityScore: 88,
+            manualAffinityUpdatedAt: date(400),
+            updatedAt: date(100),
+            revision: 1,
+            deviceID: "manual-winner"
+        )
+        let clearWinner = makeRelationship(
+            id: id("00000000-0000-0000-0000-000000001334"),
+            roleID: roleID,
+            affinityScore: 50,
+            manualAffinityScore: nil,
+            manualAffinityUpdatedAt: date(500),
+            updatedAt: date(50),
+            revision: 0,
+            deviceID: "clear-winner"
+        )
+        context.insert(makeProfile(id: roleID))
+        context.insert(rowWinner)
+        context.insert(manualWinner)
+        context.insert(clearWinner)
+        try context.save()
+
+        let preflight = try StoreDuplicateReconciler.preflight(context: context)
+        XCTAssertEqual(preflight.relationships.removed, 2)
+
+        let projected = try StoreDuplicateReconciler.makeCanonicalPayload(
+            context: context,
+            now: date(500)
+        )
+        let projectedRelationship = try XCTUnwrap(
+            projected.relationships.first { $0.roleID == roleID }
+        )
+        XCTAssertEqual(projectedRelationship.affinityScore, 12)
+        XCTAssertEqual(projectedRelationship.revision, 9)
+        XCTAssertEqual(projectedRelationship.deviceID, "row-winner")
+        XCTAssertNil(projectedRelationship.manualAffinityScore)
+        XCTAssertEqual(projectedRelationship.manualAffinityUpdatedAt, date(500))
+        XCTAssertEqual(
+            try context.fetch(FetchDescriptor<CompanionRelationshipRecord>()).count,
+            3,
+            "Canonical projection must remain read-only."
+        )
+
+        let result = try StoreDuplicateReconciler.reconcile(context: context)
+        XCTAssertEqual(result.relationships.removed, 2)
+        let remaining = try XCTUnwrap(
+            try context.fetch(FetchDescriptor<CompanionRelationshipRecord>()).first
+        )
+        XCTAssertEqual(remaining.id, rowWinner.id)
+        XCTAssertEqual(remaining.affinityScore, 12)
+        XCTAssertEqual(remaining.revision, 9)
+        XCTAssertNil(remaining.manualAffinityScore)
+        XCTAssertEqual(remaining.manualAffinityUpdatedAt, date(500))
     }
 
     func testCanonicalProfileProjectionIsReadOnlyAndContainsOneWinner() throws {

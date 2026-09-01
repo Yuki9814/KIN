@@ -14,6 +14,7 @@ private enum MemoryIndexRebuildError: Error {
 private enum AppModelRelationshipError: LocalizedError {
     case actionUnavailable(CompanionRelationshipState)
     case resetRequiresBlocked(CompanionRelationshipState)
+    case invalidAffinityScore
 
     var errorDescription: String? {
         switch self {
@@ -21,6 +22,8 @@ private enum AppModelRelationshipError: LocalizedError {
             return "当前关系状态为“\(state.title)”，暂不能提交恢复申请。"
         case .resetRequiresBlocked(let state):
             return "只有已拉黑的关系才能重置，当前状态为“\(state.title)”。"
+        case .invalidAffinityScore:
+            return "好感度必须是 0 到 100 之间的有效数值。"
         }
     }
 }
@@ -367,6 +370,7 @@ final class AppModel {
     private(set) var relationshipState: CompanionRelationshipState = .accepted
     private(set) var relationshipStatusText = CompanionRelationshipState.accepted.title
     private(set) var relationshipAffinityScore: Double = 0
+    private(set) var relationshipAffinityIsManual = false
     private(set) var contactMembership: ContactMembershipState = .active
     private(set) var momentTasks: [CompanionMomentTaskSummary] = []
     private(set) var userProfile = UserProfileSummary.fallback
@@ -787,19 +791,24 @@ final class AppModel {
         currentConversation.resolvedRoleID
     }
 
-    /// Built-in friends use a derived permanent affinity. SwiftData and
-    /// CloudKit retain a finite compatibility value while UI and prompts see
-    /// infinity, avoiding an unsupported non-finite persisted scalar.
+    /// Built-in friends default to derived permanent infinity. A deliberate
+    /// manual override takes precedence until the user restores that default.
     var isCurrentRoleAffinityInfinite: Bool {
         BuiltInCompanionCatalog.contains(roleID: currentRoleID)
+            && !relationshipAffinityIsManual
     }
 
     /// Returns the effective affinity used by behavior and prompt policy.
-    /// Built-in rows may retain a finite compatibility score, but that value
-    /// never controls their effective affinity.
+    /// A persisted manual value always wins. Without one, built-in roles keep
+    /// their infinity default and ordinary roles use automatic progression.
     func effectiveAffinityScore(for roleID: UUID) -> Double {
         let resolvedRoleID = RoleScope.resolve(roleID)
-        guard !BuiltInCompanionCatalog.contains(roleID: resolvedRoleID) else {
+        if let relationship = try? relationshipRecord(for: resolvedRoleID),
+           let manualScore = relationship.manualAffinityScore,
+           manualScore.isFinite {
+            return min(100, max(0, manualScore))
+        }
+        if BuiltInCompanionCatalog.contains(roleID: resolvedRoleID) {
             return .infinity
         }
         guard let relationship = try? relationshipRecord(for: resolvedRoleID) else {
@@ -807,6 +816,59 @@ final class AppModel {
         }
         let score = relationship.affinityScore
         return score.isFinite ? score : 0
+    }
+
+    /// Returns only the explicit user override. `nil` means built-in infinity
+    /// or ordinary automatic progression remains active.
+    func manualAffinityScore(for roleID: UUID) -> Double? {
+        guard let relationship = try? relationshipRecord(for: RoleScope.resolve(roleID)),
+              let score = relationship.manualAffinityScore,
+              score.isFinite else { return nil }
+        return min(100, max(0, score))
+    }
+
+    func setManualAffinityScore(_ score: Double, for roleID: UUID) throws {
+        guard score.isFinite, (0...100).contains(score) else {
+            throw AppModelRelationshipError.invalidAffinityScore
+        }
+        let relationship = try ensureRelationshipRecord(for: roleID)
+        let normalized = score.rounded()
+        let now = Date()
+        relationship.manualAffinityScore = normalized
+        relationship.manualAffinityUpdatedAt = now
+        relationship.affinityPolicyVersion = max(1, relationship.affinityPolicyVersion)
+        relationship.updatedAt = now
+        relationship.revision = max(0, relationship.revision) + 1
+        relationship.deviceID = deviceID
+        do {
+            try context.save()
+        } catch {
+            context.rollback()
+            throw error
+        }
+        if RoleScope.resolve(roleID) == currentRoleID {
+            reloadRelationship(for: roleID)
+        }
+    }
+
+    func clearManualAffinityScore(for roleID: UUID) throws {
+        guard let relationship = try relationshipRecord(for: roleID),
+              relationship.manualAffinityScore != nil else { return }
+        let now = Date()
+        relationship.manualAffinityScore = nil
+        relationship.manualAffinityUpdatedAt = now
+        relationship.updatedAt = now
+        relationship.revision = max(0, relationship.revision) + 1
+        relationship.deviceID = deviceID
+        do {
+            try context.save()
+        } catch {
+            context.rollback()
+            throw error
+        }
+        if RoleScope.resolve(roleID) == currentRoleID {
+            reloadRelationship(for: roleID)
+        }
     }
 
     private var conversationIndexOwner: ConversationIndexOwner {
@@ -7467,13 +7529,12 @@ final class AppModel {
             )
         }
         let timeEnabled = SettingsStore.timeInjectionEnabled(defaults: dataDefaults)
-        let time = timeEnabled
-            ? ConversationTimeContext(
-                now: now,
-                timeZone: timeZone,
-                messages: previousMessages
-            )
-            : nil
+        let time = ConversationTimeContext(
+            now: now,
+            timeZone: timeZone,
+            messages: previousMessages,
+            currentTurnOccurredAt: currentEvent?.occurredAt ?? now
+        )
         var senderLabels: [UUID: String] = [:]
         for event in promptTimeline where !conflictedEventIDs.contains(event.id) {
             let label = event.role == .user
@@ -7489,6 +7550,7 @@ final class AppModel {
             .filter {
                 $0.conversationID == conversationID
                     && $0.resolvedRoleID == RoleScope.resolve(speakingRoleID)
+                    && $0.scope == "rolling"
                     && !$0.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                     && (memoryResetCutoff == nil || $0.updatedAt > memoryResetCutoff!)
             }
@@ -7502,10 +7564,12 @@ final class AppModel {
             sharedReality: boundWorldInstruction,
             groupFacts: facts,
             affinityInstruction: AffinityPolicy.promptLine(for: affinity),
-            timeInstruction: time?.promptLine ?? "",
+            timeInstruction: timeEnabled ? time.promptLine : "",
             messageTimeContext: time,
+            includeMessageTimeMetadata: timeEnabled,
             messageSenderLabels: senderLabels,
             eventCutoff: promptTimeline.map(\.occurredAt).max() ?? currentEvent?.occurredAt ?? now,
+            currentUserEventID: currentUserEventID,
             rollingSummary: summary
         )
     }
@@ -9918,19 +9982,20 @@ final class AppModel {
         let currentEventCutoff = timeline
             .first { $0.id == currentUserEventID }?
             .occurredAt ?? now
-        let time = SettingsStore.timeInjectionEnabled(defaults: dataDefaults)
-            ? ConversationTimeContext(
-                now: now,
-                timeZone: timeZone,
-                messages: previousMessages
-            )
-            : nil
+        let timeEnabled = SettingsStore.timeInjectionEnabled(defaults: dataDefaults)
+        let time = ConversationTimeContext(
+            now: now,
+            timeZone: timeZone,
+            messages: previousMessages,
+            currentTurnOccurredAt: currentEventCutoff
+        )
         let affinity = effectiveAffinityScore(for: roleID)
         let memoryResetCutoff = latestRoleMemoryResetCutoff(roleID: roleID)
         let summary = ((try? context.fetch(FetchDescriptor<MemorySummaryRecord>())) ?? [])
             .filter {
                 $0.conversationID == currentConversation.id
                     && $0.resolvedRoleID == RoleScope.resolve(roleID)
+                    && $0.scope == "rolling"
                     && !$0.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                     && (memoryResetCutoff == nil || $0.updatedAt > memoryResetCutoff!)
             }
@@ -9945,9 +10010,11 @@ final class AppModel {
             sharedReality: boundWorldInstruction,
             groupFacts: groupFacts,
             affinityInstruction: AffinityPolicy.promptLine(for: affinity),
-            timeInstruction: time?.promptLine ?? "",
+            timeInstruction: timeEnabled ? time.promptLine : "",
             messageTimeContext: time,
+            includeMessageTimeMetadata: timeEnabled,
             eventCutoff: currentEventCutoff,
+            currentUserEventID: currentUserEventID,
             rollingSummary: summary
         )
     }
@@ -9976,9 +10043,34 @@ final class AppModel {
         let roleID = RoleScope.resolve(rawRoleID)
         let includesLegacyNilRows = roleID == RoleScope.legacyRoleID
         let userRoleRaw = EventRole.user.rawValue
+        let assistantRoleRaw = EventRole.assistant.rawValue
         let completeStateRaw = EventDeliveryState.complete.rawValue
         let currentOccurredAt = currentEvent.occurredAt
-        var descriptor = FetchDescriptor<ConversationEvent>(
+        let ordering = [
+            SortDescriptor(\ConversationEvent.occurredAt, order: .reverse),
+            SortDescriptor(\ConversationEvent.logicalTimestamp, order: .reverse),
+            SortDescriptor(\ConversationEvent.id, order: .reverse)
+        ]
+        var activityDescriptor = FetchDescriptor<ConversationEvent>(
+            predicate: #Predicate {
+                $0.conversationID == conversationID
+                    && ($0.roleID == roleID
+                        || (includesLegacyNilRows && $0.roleID == nil))
+                    && ($0.roleRaw == userRoleRaw || $0.roleRaw == assistantRoleRaw)
+                    && $0.deliveryStateRaw == completeStateRaw
+                    && !$0.redacted
+                    && $0.occurredAt <= currentOccurredAt
+            },
+            sortBy: ordering
+        )
+        activityDescriptor.fetchLimit = max(16, conflictedEventIDs.count + 2)
+        let latestActivity = ((try? context.fetch(activityDescriptor)) ?? []).first {
+            $0.id != currentUserEventID
+                && !conflictedEventIDs.contains($0.id)
+                && Self.event($0, occursBefore: currentEvent)
+        }
+
+        var userDescriptor = FetchDescriptor<ConversationEvent>(
             predicate: #Predicate {
                 $0.conversationID == conversationID
                     && ($0.roleID == roleID
@@ -9988,19 +10080,22 @@ final class AppModel {
                     && !$0.redacted
                     && $0.occurredAt <= currentOccurredAt
             },
-            sortBy: [
-                SortDescriptor(\.occurredAt, order: .reverse),
-                SortDescriptor(\.logicalTimestamp, order: .reverse),
-                SortDescriptor(\.id, order: .reverse)
-            ]
+            sortBy: ordering
         )
-        descriptor.fetchLimit = max(16, conflictedEventIDs.count + 2)
-        let previous = ((try? context.fetch(descriptor)) ?? []).first {
+        userDescriptor.fetchLimit = max(16, conflictedEventIDs.count + 2)
+        let previousUser = ((try? context.fetch(userDescriptor)) ?? []).first {
             $0.id != currentUserEventID
                 && !conflictedEventIDs.contains($0.id)
                 && Self.event($0, occursBefore: currentEvent)
         }
-        guard let previous else {
+
+        var previousEvents: [ConversationEvent] = []
+        if let latestActivity { previousEvents.append(latestActivity) }
+        if let previousUser,
+           previousEvents.allSatisfy({ $0.id != previousUser.id }) {
+            previousEvents.append(previousUser)
+        }
+        guard !previousEvents.isEmpty else {
             return timeline
                 .filter { $0.id != currentUserEventID }
                 .map {
@@ -10011,11 +10106,13 @@ final class AppModel {
                     )
                 }
         }
-        return [ConversationTimeMessage(
-            occurredAt: previous.occurredAt,
-            role: previous.role,
-            deliveryState: previous.deliveryState
-        )]
+        return previousEvents.map {
+            ConversationTimeMessage(
+                occurredAt: $0.occurredAt,
+                role: $0.role,
+                deliveryState: $0.deliveryState
+            )
+        }
     }
 
     private func scheduleAutomaticMemoryMaintenance(
@@ -13161,6 +13258,7 @@ final class AppModel {
                 contactMembership = .active
                 relationshipState = .accepted
                 relationshipStatusText = CompanionRelationshipState.accepted.title
+                relationshipAffinityIsManual = false
                 relationshipAffinityScore = BuiltInCompanionCatalog.contains(roleID: roleID)
                     ? .infinity
                     : 0
@@ -13170,7 +13268,11 @@ final class AppModel {
             let previousState = relationshipState
             let previousRevision = relationshipRecordRevision
             let isLegacyRole = RoleScope.resolve(roleID) == RoleScope.legacyRoleID
+            let manualAffinity = relationship.manualAffinityScore.flatMap {
+                $0.isFinite ? min(100, max(0, $0)) : nil
+            }
             let hasInfiniteAffinity = BuiltInCompanionCatalog.contains(roleID: roleID)
+                && manualAffinity == nil
             relationshipRecordID = relationship.id
             relationshipRecordRevision = relationship.revision
             relationshipRetired = isLegacyRole ? false : relationship.retiredAt != nil
@@ -13179,9 +13281,9 @@ final class AppModel {
             relationshipStatusText = isLegacyRole
                 ? CompanionRelationshipState.accepted.title
                 : relationship.state.title
-            relationshipAffinityScore = hasInfiniteAffinity
-                ? .infinity
-                : relationship.affinityScore
+            relationshipAffinityIsManual = manualAffinity != nil
+            relationshipAffinityScore = manualAffinity
+                ?? (hasInfiniteAffinity ? .infinity : relationship.affinityScore)
 
             // Only physical retirement removes the role. Contact-state labels
             // never interrupt an in-flight conversation or memory pass.
@@ -13206,6 +13308,7 @@ final class AppModel {
                 contactMembership = .active
                 relationshipState = .accepted
                 relationshipStatusText = CompanionRelationshipState.accepted.title
+                relationshipAffinityIsManual = false
                 relationshipAffinityScore = BuiltInCompanionCatalog.contains(roleID: roleID)
                     ? .infinity
                     : 0
@@ -13546,7 +13649,8 @@ final class AppModel {
         // persisted score, tier, idempotency marker, or revision for it.
         guard !BuiltInCompanionCatalog.contains(roleID: relationship.roleID) else {
             if RoleScope.resolve(relationship.roleID) == currentRoleID {
-                relationshipAffinityScore = .infinity
+                relationshipAffinityIsManual = relationship.manualAffinityScore != nil
+                relationshipAffinityScore = relationship.manualAffinityScore ?? .infinity
             }
             return
         }
@@ -13559,7 +13663,9 @@ final class AppModel {
         relationship.affinityPolicyVersion = 1
         relationship.lastAffinityEventID = eventID
         if RoleScope.resolve(relationship.roleID) == currentRoleID {
-            relationshipAffinityScore = relationship.affinityScore
+            relationshipAffinityIsManual = relationship.manualAffinityScore != nil
+            relationshipAffinityScore = relationship.manualAffinityScore
+                ?? relationship.affinityScore
         }
         // Affinity is behavior/prompt state only. Moment publication remains
         // an explicit user/AI action, never a hidden threshold-triggered post.
@@ -13604,7 +13710,8 @@ final class AppModel {
         relationship.revision = max(0, relationship.revision) + 1
         relationship.deviceID = deviceID
         if roleID == currentRoleID {
-            relationshipAffinityScore = nextScore
+            relationshipAffinityIsManual = relationship.manualAffinityScore != nil
+            relationshipAffinityScore = relationship.manualAffinityScore ?? nextScore
         }
         return nextScore != previousScore
     }

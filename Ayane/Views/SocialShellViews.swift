@@ -253,7 +253,11 @@ struct CompanionContactView: View {
                             VStack(spacing: 0) {
                                 detailRow("当前状态", value: profile.relationshipState.title)
                                 divider
-                                detailRow("亲密度", value: affinityDisplayText)
+                                Button(action: openPersonaEditor) {
+                                    editableDetailRow("好感度", value: affinityDisplayText)
+                                }
+                                .buttonStyle(.plain)
+                                .accessibilityIdentifier("wechat.contact.affinity.edit")
                                 divider
                                 detailRow(
                                     "世界观",
@@ -321,7 +325,7 @@ struct CompanionContactView: View {
                             }
 
                             Button(action: openPersonaEditor) {
-                                Label("角色卡与世界观", systemImage: "person.text.rectangle")
+                                Label("角色设置与好感度", systemImage: "person.text.rectangle")
                                     .font(.system(size: 15, weight: .medium))
                                     .frame(maxWidth: .infinity, minHeight: 46)
                             }
@@ -446,6 +450,25 @@ struct CompanionContactView: View {
         }
         .padding(.horizontal, 16)
         .frame(minHeight: 50)
+    }
+
+    private func editableDetailRow(_ title: String, value: String) -> some View {
+        HStack(spacing: 10) {
+            Text(title)
+                .font(.system(size: 15))
+                .foregroundStyle(AppTheme.primaryText)
+            Spacer(minLength: 12)
+            Text(value)
+                .font(.system(size: 14))
+                .foregroundStyle(AppTheme.secondaryText)
+                .multilineTextAlignment(.trailing)
+            Image(systemName: "chevron.right")
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(AppTheme.tertiaryText)
+        }
+        .padding(.horizontal, 16)
+        .frame(minHeight: 50)
+        .contentShape(Rectangle())
     }
 
     private func dataActionRow(_ title: String, action: @escaping () -> Void) -> some View {

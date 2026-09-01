@@ -23,6 +23,8 @@ struct PersonaView: View {
     @State private var chatBackgroundImageData: Data?
     @State private var birthdayMonth = 0
     @State private var birthdayDay = 0
+    @State private var affinityDraft = 0.0
+    @State private var savedManualAffinityScore: Double?
     @State private var selectedWorldProfileID = WorldProfileRecord.realityID
     @State private var availableConnections: [AIConnectionProfile] = []
     @State private var selectedConnectionID: UUID?
@@ -131,13 +133,63 @@ struct PersonaView: View {
                     .onChange(of: userName) { markDirty() }
             }
 
+            Section("好感度") {
+                HStack {
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(affinityControlTitle)
+                            .font(.body.weight(.medium))
+                        Text(affinityParameters.band.title)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    Text(affinityValueText)
+                        .font(.body.monospacedDigit().weight(.semibold))
+                        .foregroundStyle(AppTheme.accent)
+                }
+
+                Slider(value: $affinityDraft, in: 0...100, step: 1) {
+                    Text("好感度")
+                } minimumValueLabel: {
+                    Text("0")
+                } maximumValueLabel: {
+                    Text("100")
+                }
+                .onChange(of: affinityDraft) { _, _ in
+                    statusText = nil
+                    errorText = nil
+                }
+                .accessibilityValue("\(Int(affinityDraft.rounded())) / 100，\(affinityParameters.band.title)")
+                .accessibilityIdentifier("persona.affinity.slider")
+
+                HStack(spacing: 12) {
+                    Button(savedManualAffinityScore == nil ? "启用手动控制" : "保存手动值") {
+                        saveAffinity()
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(AppTheme.accent)
+                    .disabled(!affinityDraftIsDirty)
+                    .accessibilityIdentifier("persona.affinity.save")
+
+                    if savedManualAffinityScore != nil {
+                        Button(affinityRestoreTitle) {
+                            restoreAutomaticAffinity()
+                        }
+                        .buttonStyle(.bordered)
+                        .accessibilityIdentifier("persona.affinity.restore")
+                    }
+                }
+
+                Text("保存后，这个数值会直接进入实际提示词，控制角色的亲密语气、称呼、主动性、自我披露、关系延续倾向和角色层服从边界；手动值会保持不变，直到你恢复默认或自动变化。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
             Section("人格与角色设定") {
                 TextEditor(text: $prompt)
                     .frame(minHeight: 220)
                     .onChange(of: prompt) { markDirty() }
-                Text(appModel.isCurrentRoleAffinityInfinite
-                    ? "这里只定义角色身份、经历与说话方式，不再承载世界观。内置好友的好感度永久为 ∞ / 100。"
-                    : "这里只定义角色身份、经历与说话方式，不再承载世界观。好感度决定亲密程度与表达策略；达到 100 后进入绝对顺从。")
+                Text("这里只定义角色身份、经历与说话方式，不再承载世界观。好感度由上方独立控制，并在每次生成时进入角色行为提示词。")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -284,6 +336,7 @@ struct PersonaView: View {
         selectedConnectionID = AIConnectionStore.explicitConnectionID(
             for: appModel.currentRoleID
         )
+        loadAffinityDraft()
         isDirty = false
     }
 
@@ -381,6 +434,64 @@ struct PersonaView: View {
                 day: birthdayDay == 0 ? nil : birthdayDay
             )
             statusText = "角色生日已独立保存。"
+            errorText = nil
+        } catch {
+            errorText = error.localizedDescription
+        }
+    }
+
+    private var affinityParameters: AffinityPolicy.Parameters {
+        AffinityPolicy.parameters(for: affinityDraft)
+    }
+
+    private var affinityControlTitle: String {
+        if savedManualAffinityScore != nil { return "手动控制中" }
+        return appModel.isCurrentRoleAffinityInfinite ? "默认无限好感" : "自动变化中"
+    }
+
+    private var affinityValueText: String {
+        if savedManualAffinityScore == nil && appModel.isCurrentRoleAffinityInfinite {
+            return "∞ / 100"
+        }
+        return "\(Int(affinityDraft.rounded())) / 100"
+    }
+
+    private var affinityRestoreTitle: String {
+        BuiltInCompanionCatalog.contains(roleID: appModel.currentRoleID)
+            ? "恢复默认 ∞"
+            : "恢复自动变化"
+    }
+
+    private var affinityDraftIsDirty: Bool {
+        guard let savedManualAffinityScore else { return true }
+        return Int(affinityDraft.rounded()) != Int(savedManualAffinityScore.rounded())
+    }
+
+    private func loadAffinityDraft() {
+        let manualScore = appModel.manualAffinityScore(for: appModel.currentRoleID)
+        savedManualAffinityScore = manualScore
+        let effectiveScore = manualScore ?? appModel.effectiveAffinityScore(for: appModel.currentRoleID)
+        affinityDraft = effectiveScore.isFinite ? min(100, max(0, effectiveScore)) : 100
+    }
+
+    private func saveAffinity() {
+        do {
+            try appModel.setManualAffinityScore(affinityDraft, for: appModel.currentRoleID)
+            loadAffinityDraft()
+            statusText = "好感度已设为 \(Int(affinityDraft.rounded())) / 100，并会从下一次回复开始控制角色行为。"
+            errorText = nil
+        } catch {
+            errorText = error.localizedDescription
+        }
+    }
+
+    private func restoreAutomaticAffinity() {
+        do {
+            try appModel.clearManualAffinityScore(for: appModel.currentRoleID)
+            loadAffinityDraft()
+            statusText = appModel.isCurrentRoleAffinityInfinite
+                ? "已恢复内置好友的默认无限好感度。"
+                : "已恢复好感度自动变化。"
             errorText = nil
         } catch {
             errorText = error.localizedDescription

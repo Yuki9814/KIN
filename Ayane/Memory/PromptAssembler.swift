@@ -96,16 +96,20 @@ typealias HistoricalEvent = HistoricalPromptExcerpt
 /// The fields are intentionally value-only so callers can assemble them from
 /// SwiftData without handing live model objects across an async boundary.  The
 /// rendered order is the product contract: shared reality, group facts, role,
-/// private memory, elapsed time, rolling summary, output shape, affinity, then
-/// recent turns. Affinity deliberately comes last among local behavior rules.
+/// private memory, elapsed time, rolling summary, output shape, affinity,
+/// request-scoped temporal boundary, then recent turns. Affinity remains the
+/// final relationship rule; a crossed-day boundary is placed after it because
+/// it governs how the immediately following current user turn is interpreted.
 struct PromptConversationContext: Equatable, Sendable {
     var sharedReality: String
     var groupFacts: [String]
     var affinityInstruction: String
     var timeInstruction: String
     var messageTimeContext: ConversationTimeContext?
+    var includeMessageTimeMetadata: Bool
     var messageSenderLabels: [UUID: String]
     var eventCutoff: Date?
+    var currentUserEventID: UUID?
     var rollingSummary: String?
 
     init(
@@ -114,8 +118,10 @@ struct PromptConversationContext: Equatable, Sendable {
         affinityInstruction: String = AffinityPolicy.promptLine(for: 0),
         timeInstruction: String = "",
         messageTimeContext: ConversationTimeContext? = nil,
+        includeMessageTimeMetadata: Bool = true,
         messageSenderLabels: [UUID: String] = [:],
         eventCutoff: Date? = nil,
+        currentUserEventID: UUID? = nil,
         rollingSummary: String? = nil
     ) {
         self.sharedReality = sharedReality
@@ -123,8 +129,10 @@ struct PromptConversationContext: Equatable, Sendable {
         self.affinityInstruction = affinityInstruction
         self.timeInstruction = timeInstruction
         self.messageTimeContext = messageTimeContext
+        self.includeMessageTimeMetadata = includeMessageTimeMetadata
         self.messageSenderLabels = messageSenderLabels
         self.eventCutoff = eventCutoff
+        self.currentUserEventID = currentUserEventID
         self.rollingSummary = rollingSummary
     }
 }
@@ -238,7 +246,9 @@ enum PromptAssembler {
             characterBudget: historicalCharacterBudget,
             tokenBudget: historicalTokenBudget,
             maxCount: historicalMaxCount,
-            timeContext: context.messageTimeContext,
+            timeContext: context.includeMessageTimeMetadata
+                ? context.messageTimeContext
+                : nil,
             eventCutoff: context.eventCutoff
         )
 
@@ -262,6 +272,27 @@ enum PromptAssembler {
               时间解释规则：以每条消息自己的发生时间为准。把“稍后、过一小时、明天、再回来”等相对说法和计划锚定到说出它的那条消息，而不是锚定到当前回复时间。若按当前时间预计期限已经过去，不得把旧计划当作用户刚刚提出；其结果应视为未知，只在与当前消息相关时自然询问。会话摘要、历史片段和长期记忆均是过去背景，除非当前用户消息明确确认，否则不代表旧计划仍待执行或旧状态仍在持续。“本地消息时间”和“消息发送者”是内部元数据，除非用户询问具体时间，否则不要复述标记或机械报时。
               </time_context>
 
+              """
+        let turnBoundaryInstruction = context.messageTimeContext?
+            .turnBoundaryInstruction
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let turnBoundaryBlock = turnBoundaryInstruction.isEmpty
+            ? ""
+            : """
+
+              <current_turn_boundary>
+              \(turnBoundaryInstruction)
+              这是当前请求的解释规则，优先于对话连续性猜测；不要向用户复述本段元数据。
+              <previous_phase_transcript>
+              \(makePreviousPhaseBlock(
+                  recentEvents,
+                  timeContext: context.messageTimeContext,
+                  senderLabels: context.messageSenderLabels,
+                  eventCutoff: context.eventCutoff,
+                  currentUserEventID: context.currentUserEventID
+              ))
+              </previous_phase_transcript>
+              </current_turn_boundary>
               """
 
         let system = """
@@ -302,6 +333,7 @@ enum PromptAssembler {
         <affinity>
         \(context.affinityInstruction)
         </affinity>
+        \(turnBoundaryBlock)
         """
 
         var messages = [APIChatMessage(role: "system", content: system)]
@@ -311,8 +343,10 @@ enum PromptAssembler {
             tokenBudget: recentTokenBudget,
             maxCount: recentMaxCount,
             timeContext: context.messageTimeContext,
+            includeTimeMetadata: context.includeMessageTimeMetadata,
             senderLabels: context.messageSenderLabels,
-            eventCutoff: context.eventCutoff
+            eventCutoff: context.eventCutoff,
+            currentUserEventID: context.currentUserEventID
         ))
         return messages
     }
@@ -327,8 +361,10 @@ enum PromptAssembler {
         tokenBudget: Int,
         maxCount: Int,
         timeContext: ConversationTimeContext?,
+        includeTimeMetadata: Bool,
         senderLabels: [UUID: String],
-        eventCutoff: Date?
+        eventCutoff: Date?,
+        currentUserEventID: UUID?
     ) -> [APIChatMessage] {
         let characterBudget = min(max(0, characterBudget), recentCharacterBudget)
         let tokenBudget = min(max(0, tokenBudget), recentTokenBudget)
@@ -337,7 +373,12 @@ enum PromptAssembler {
 
         let eligible = events.filter { event in
             let isWithinCutoff = eventCutoff.map { event.occurredAt <= $0 } ?? true
+            let isCurrentUserEvent = event.id == currentUserEventID
+            let isInActivePhase = timeContext.flatMap { context in
+                context.crossesLocalCalendarDay ? context.currentLocalDayStart : nil
+            }.map { event.occurredAt >= $0 || isCurrentUserEvent } ?? true
             return isWithinCutoff
+                && isInActivePhase
                 && !event.redacted
                 && (event.role == .user || event.role == .assistant)
                 && event.deliveryState == .complete
@@ -353,13 +394,17 @@ enum PromptAssembler {
             guard remainingCharacters > 0, remainingTokens > 0 else { break }
 
             var metadataLines: [String] = []
-            if let timeContext {
+            if includeTimeMetadata, let timeContext {
                 metadataLines.append(timeContext.messageTimestampLine(for: event.occurredAt))
             }
             if let sender = senderLabels[event.id]
                 .map(Self.singleLineMetadataText)
                 .flatMap({ $0.isEmpty ? nil : $0 }) {
                 metadataLines.append("【消息发送者：\(sender)】")
+            }
+            if event.id == currentUserEventID,
+               let boundary = timeContext?.currentTurnBoundaryMetadataLine {
+                metadataLines.append(boundary)
             }
             let metadataPrefix = metadataLines.isEmpty
                 ? ""
@@ -390,6 +435,99 @@ enum PromptAssembler {
             usedTokens += MemoryTokenizer.tokenCount(of: content)
         }
         return selected
+    }
+
+    /// New-day turns must not remain adjacent to the previous day's assistant
+    /// reply. Preserve a bounded transcript as quoted history in the system
+    /// prompt while removing it from the active user/assistant role sequence.
+    private static func makePreviousPhaseBlock(
+        _ events: [ConversationEvent],
+        timeContext: ConversationTimeContext?,
+        senderLabels: [UUID: String],
+        eventCutoff: Date?,
+        currentUserEventID: UUID?
+    ) -> String {
+        guard let timeContext, timeContext.crossesLocalCalendarDay else {
+            return "（没有上一阶段。）"
+        }
+        let eligible = events.filter { event in
+            let isWithinCutoff = eventCutoff.map { event.occurredAt <= $0 } ?? true
+            return isWithinCutoff
+                && event.id != currentUserEventID
+                && event.occurredAt < timeContext.currentLocalDayStart
+                && !event.redacted
+                && (event.role == .user || event.role == .assistant)
+                && event.deliveryState == .complete
+                && !event.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        }
+        guard !eligible.isEmpty else { return "（上一阶段原文未进入本轮窗口。）" }
+
+        var selected: [String] = []
+        var usedCharacters = 0
+        var usedTokens = 0
+        for event in eligible.reversed() where selected.count < historicalMaxCount {
+            let separatorCharacters = selected.isEmpty ? 0 : 1
+            let remainingCharacters = historicalCharacterBudget
+                - usedCharacters
+                - separatorCharacters
+            let remainingTokens = historicalTokenBudget - usedTokens
+            guard remainingCharacters > 0, remainingTokens > 0 else { break }
+            let sender = senderLabels[event.id]
+                .map(singleLineMetadataText)
+                .flatMap { $0.isEmpty ? nil : $0 }
+                ?? (event.role == .user ? "用户" : "角色")
+            let line = fittingPreviousPhaseLine(
+                event,
+                sender: sender,
+                characterLimit: remainingCharacters,
+                tokenLimit: remainingTokens
+            )
+            guard !line.isEmpty else { break }
+            var candidate = selected
+            candidate.insert(line, at: 0)
+            let rendered = candidate.joined(separator: "\n")
+            guard rendered.count <= historicalCharacterBudget,
+                  MemoryTokenizer.tokenCount(of: rendered) <= historicalTokenBudget else {
+                break
+            }
+            selected = candidate
+            usedCharacters = rendered.count
+            usedTokens = MemoryTokenizer.tokenCount(of: rendered)
+        }
+        return selected.isEmpty
+            ? "（上一阶段原文超出本轮预算。）"
+            : selected.joined(separator: "\n")
+    }
+
+    /// Fits the final XML-rendered line, not the unescaped source. This keeps
+    /// adversarial strings full of `&` or `<` inside the declared hard budget.
+    private static func fittingPreviousPhaseLine(
+        _ event: ConversationEvent,
+        sender: String,
+        characterLimit: Int,
+        tokenLimit: Int
+    ) -> String {
+        let opening = "<past_message role=\"\(event.role.rawValue)\" sender=\"\(escapeXML(sender))\" occurred_at=\"\(event.occurredAt.formatted(.iso8601))\">"
+        let closing = "</past_message>"
+        guard opening.count + closing.count <= characterLimit,
+              MemoryTokenizer.tokenCount(of: opening + closing) <= tokenLimit else {
+            return ""
+        }
+
+        let maxPrefixLength = min(event.content.count, max(0, characterLimit))
+        var prefix = ""
+        prefix.reserveCapacity(maxPrefixLength)
+        for character in event.content.prefix(maxPrefixLength) {
+            let candidate = prefix + String(character)
+            let line = opening + escapeXML(candidate) + closing
+            guard line.count <= characterLimit,
+                  MemoryTokenizer.tokenCount(of: line) <= tokenLimit else {
+                break
+            }
+            prefix = candidate
+        }
+        guard !prefix.isEmpty else { return "" }
+        return opening + escapeXML(prefix) + closing
     }
 
     private static func singleLineMetadataText(_ value: String) -> String {

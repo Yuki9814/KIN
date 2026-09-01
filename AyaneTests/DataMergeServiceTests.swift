@@ -320,6 +320,197 @@ final class DataMergeServiceTests: XCTestCase {
         XCTAssertEqual(restored.deviceID, "source-device")
     }
 
+    func testRelationshipMergeInsertsAndUpdatesManualAffinityScore() throws {
+        let relationshipID = uuid(130)
+        let sourceContext = makeContext()
+        sourceContext.insert(makeConversation(id: uuid(131), title: "关系合并"))
+        sourceContext.insert(makeProfile())
+        sourceContext.insert(makeRelationship(
+            id: relationshipID,
+            affinityScore: 8,
+            manualAffinityScore: 42,
+            updatedAt: date(10),
+            revision: 1,
+            deviceID: "source-device"
+        ))
+        try sourceContext.save()
+
+        let destinationContext = makeContext()
+        let inserted = try DataMergeService.merge(
+            try makePayload(from: sourceContext),
+            into: destinationContext
+        )
+        XCTAssertEqual(inserted.relationships, DataMergeEntityReport(inserted: 1, updated: 0, unchanged: 0))
+        XCTAssertEqual(
+            try XCTUnwrap(
+                try destinationContext.fetch(FetchDescriptor<CompanionRelationshipRecord>()).first
+            ).manualAffinityScore,
+            42
+        )
+        XCTAssertEqual(
+            try XCTUnwrap(
+                try destinationContext.fetch(FetchDescriptor<CompanionRelationshipRecord>()).first
+            ).manualAffinityUpdatedAt,
+            date(10),
+            "A manual score without an explicit timestamp uses updatedAt."
+        )
+
+        let newerContext = makeContext()
+        newerContext.insert(makeConversation(id: uuid(131), title: "关系合并"))
+        newerContext.insert(makeProfile())
+        newerContext.insert(makeRelationship(
+            id: relationshipID,
+            affinityScore: 11,
+            manualAffinityScore: 78,
+            manualAffinityUpdatedAt: date(25),
+            updatedAt: date(20),
+            revision: 2,
+            deviceID: "newer-device"
+        ))
+        try newerContext.save()
+
+        let updated = try DataMergeService.merge(
+            try makePayload(from: newerContext),
+            into: destinationContext
+        )
+        XCTAssertEqual(updated.relationships, DataMergeEntityReport(inserted: 0, updated: 1, unchanged: 0))
+        XCTAssertEqual(
+            try XCTUnwrap(
+                try destinationContext.fetch(FetchDescriptor<CompanionRelationshipRecord>()).first
+            ).manualAffinityScore,
+            78
+        )
+        XCTAssertEqual(
+            try XCTUnwrap(
+                try destinationContext.fetch(FetchDescriptor<CompanionRelationshipRecord>()).first
+            ).manualAffinityUpdatedAt,
+            date(25)
+        )
+
+        let staleClearContext = makeContext()
+        staleClearContext.insert(makeConversation(id: uuid(131), title: "关系合并"))
+        staleClearContext.insert(makeProfile())
+        staleClearContext.insert(makeRelationship(
+            id: relationshipID,
+            affinityScore: 13,
+            manualAffinityScore: nil,
+            manualAffinityUpdatedAt: date(24),
+            updatedAt: date(40),
+            revision: 3,
+            deviceID: "stale-clear-device"
+        ))
+        try staleClearContext.save()
+
+        let staleClear = try DataMergeService.merge(
+            try makePayload(from: staleClearContext),
+            into: destinationContext
+        )
+        XCTAssertEqual(staleClear.relationships.updated, 1)
+        let preservedAfterStaleClear = try XCTUnwrap(
+            try destinationContext.fetch(FetchDescriptor<CompanionRelationshipRecord>()).first
+        )
+        XCTAssertEqual(preservedAfterStaleClear.manualAffinityScore, 78)
+        XCTAssertEqual(preservedAfterStaleClear.manualAffinityUpdatedAt, date(25))
+
+        let latestContext = makeContext()
+        latestContext.insert(makeConversation(id: uuid(131), title: "关系合并"))
+        latestContext.insert(makeProfile())
+        latestContext.insert(makeRelationship(
+            id: relationshipID,
+            affinityScore: 14,
+            manualAffinityScore: nil,
+            manualAffinityUpdatedAt: date(30),
+            updatedAt: date(30),
+            revision: 3,
+            deviceID: "latest-device"
+        ))
+        try latestContext.save()
+
+        let cleared = try DataMergeService.merge(
+            try makePayload(from: latestContext),
+            into: destinationContext
+        )
+        XCTAssertEqual(cleared.relationships, DataMergeEntityReport(inserted: 0, updated: 1, unchanged: 0))
+        XCTAssertNil(
+            try XCTUnwrap(
+                try destinationContext.fetch(FetchDescriptor<CompanionRelationshipRecord>()).first
+            ).manualAffinityScore
+        )
+        XCTAssertEqual(
+            try XCTUnwrap(
+                try destinationContext.fetch(FetchDescriptor<CompanionRelationshipRecord>()).first
+            ).manualAffinityUpdatedAt,
+            date(30)
+        )
+    }
+
+    func testLegacyRelationshipPayloadTreatsManualAffinityAsAbsent() throws {
+        let relationshipID = uuid(140)
+        let targetContext = makeContext()
+        targetContext.insert(makeProfile(
+            updatedAt: date(100),
+            revision: 1,
+            deviceID: "target-profile"
+        ))
+        targetContext.insert(makeRelationship(
+            id: relationshipID,
+            affinityScore: 8,
+            manualAffinityScore: nil,
+            updatedAt: date(150),
+            revision: 2,
+            deviceID: "target-row-winner"
+        ))
+        targetContext.insert(makeRelationship(
+            id: uuid(142),
+            affinityScore: 7,
+            manualAffinityScore: 88,
+            manualAffinityUpdatedAt: date(200),
+            updatedAt: date(100),
+            revision: 1,
+            deviceID: "target-device"
+        ))
+        try targetContext.save()
+
+        let sourceContext = makeContext()
+        sourceContext.insert(makeConversation(id: uuid(141), title: "旧关系备份"))
+        sourceContext.insert(makeProfile(
+            updatedAt: date(300),
+            revision: 9,
+            deviceID: "source-profile"
+        ))
+        sourceContext.insert(makeRelationship(
+            id: relationshipID,
+            affinityScore: 12,
+            manualAffinityScore: nil,
+            updatedAt: date(300),
+            revision: 9,
+            deviceID: "source-device"
+        ))
+        try sourceContext.save()
+
+        let currentPayload = try makePayload(from: sourceContext)
+        let legacyPayload = try mutateJSON(currentPayload) { root in
+            root["schema_version"] = 17
+            var relationships = try XCTUnwrap(root["relationships"] as? [[String: Any]])
+            relationships[0].removeValue(forKey: "manual_affinity_score")
+            relationships[0].removeValue(forKey: "manual_affinity_updated_at")
+            root["relationships"] = relationships
+        }
+
+        let report = try DataMergeService.merge(legacyPayload, into: targetContext)
+
+        XCTAssertEqual(report.relationships, DataMergeEntityReport(inserted: 0, updated: 1, unchanged: 0))
+        let restored = try XCTUnwrap(
+            try targetContext.fetch(FetchDescriptor<CompanionRelationshipRecord>())
+                .first(where: { $0.deviceID == "source-device" })
+        )
+        XCTAssertEqual(restored.affinityScore, 12)
+        XCTAssertEqual(restored.revision, 9)
+        XCTAssertEqual(restored.deviceID, "source-device")
+        XCTAssertEqual(restored.manualAffinityScore, 88)
+        XCTAssertEqual(restored.manualAffinityUpdatedAt, date(200))
+    }
+
     func testProfileLWWUsesRevisionThenTimestampDeviceAndContentFingerprint() throws {
         let targetContext = makeContext()
         targetContext.insert(makeConversation(id: uuid(121), title: "Persona"))
@@ -1451,6 +1642,31 @@ final class DataMergeServiceTests: XCTestCase {
             userName: userName,
             prompt: prompt,
             createdAt: createdAt,
+            updatedAt: updatedAt,
+            revision: revision,
+            deviceID: deviceID
+        )
+    }
+
+    private func makeRelationship(
+        id: UUID,
+        roleID: UUID = RoleScope.legacyRoleID,
+        affinityScore: Double,
+        manualAffinityScore: Double?,
+        manualAffinityUpdatedAt: Date? = nil,
+        updatedAt: Date,
+        revision: Int,
+        deviceID: String
+    ) -> CompanionRelationshipRecord {
+        CompanionRelationshipRecord(
+            id: id,
+            roleID: roleID,
+            state: .accepted,
+            affinityScore: affinityScore,
+            affinityTier: 1,
+            manualAffinityScore: manualAffinityScore,
+            manualAffinityUpdatedAt: manualAffinityUpdatedAt,
+            createdAt: date(0),
             updatedAt: updatedAt,
             revision: revision,
             deviceID: deviceID

@@ -26,11 +26,6 @@ final class BuiltInCompanionCatalogTests: XCTestCase {
             defaults: defaults,
             deviceID: "test-device"
         ))
-        XCTAssertFalse(try BuiltInCompanionCatalog.seedIfNeeded(
-            in: context,
-            defaults: defaults,
-            deviceID: "test-device"
-        ))
 
         let profiles = try context.fetch(FetchDescriptor<CompanionProfileRecord>())
         XCTAssertEqual(profiles.count, 1)
@@ -43,6 +38,22 @@ final class BuiltInCompanionCatalogTests: XCTestCase {
         XCTAssertEqual(relationships.count, 1)
         XCTAssertEqual(relationships[0].affinityScore, 100)
         XCTAssertEqual(relationships[0].state, .accepted)
+        XCTAssertNil(relationships[0].manualAffinityScore)
+
+        relationships[0].manualAffinityScore = 42
+        try context.save()
+        XCTAssertFalse(try BuiltInCompanionCatalog.seedIfNeeded(
+            in: context,
+            defaults: defaults,
+            deviceID: "test-device"
+        ))
+        XCTAssertEqual(
+            try XCTUnwrap(
+                try context.fetch(FetchDescriptor<CompanionRelationshipRecord>())
+                    .first { $0.roleID == RoleScope.legacyRoleID }
+            ).manualAffinityScore,
+            42
+        )
         XCTAssertEqual(defaults.integer(forKey: SettingsKeys.builtInCompanionCatalogMigrationVersion), 3)
     }
 

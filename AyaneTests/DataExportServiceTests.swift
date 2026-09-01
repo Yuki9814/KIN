@@ -437,6 +437,59 @@ final class DataExportServiceTests: XCTestCase {
         XCTAssertEqual(clearedConversationIndexCount, 0)
     }
 
+    func testRelationshipExportRoundTripPreservesManualAffinityAndLegacyDefaultsToNil() throws {
+        let updatedAt = Date(timeIntervalSince1970: 100)
+        let record = CompanionRelationshipRecord(
+            roleID: RoleScope.legacyRoleID,
+            affinityScore: 100,
+            affinityTier: 3,
+            manualAffinityScore: 42,
+            updatedAt: updatedAt
+        )
+        let encoded = try JSONEncoder().encode(AyaneRelationshipExport(record))
+        let decoded = try JSONDecoder().decode(AyaneRelationshipExport.self, from: encoded)
+        XCTAssertEqual(decoded.manualAffinityScore, 42)
+        XCTAssertEqual(
+            decoded.manualAffinityUpdatedAt,
+            updatedAt,
+            "A manual score without an explicit timestamp falls back to updatedAt."
+        )
+
+        let clearTime = Date(timeIntervalSince1970: 200)
+        let explicitClear = AyaneRelationshipExport(
+            roleID: RoleScope.legacyRoleID,
+            manualAffinityScore: nil,
+            manualAffinityUpdatedAt: clearTime,
+            createdAt: updatedAt,
+            updatedAt: clearTime
+        )
+        let clearEncoded = try JSONEncoder().encode(explicitClear)
+        let clearObject = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: clearEncoded) as? [String: Any]
+        )
+        XCTAssertTrue(clearObject["manual_affinity_score"] is NSNull)
+        XCTAssertNotNil(clearObject["manual_affinity_updated_at"])
+        let clearDecoded = try JSONDecoder().decode(
+            AyaneRelationshipExport.self,
+            from: clearEncoded
+        )
+        XCTAssertNil(clearDecoded.manualAffinityScore)
+        XCTAssertEqual(clearDecoded.manualAffinityUpdatedAt, clearTime)
+
+        var legacyObject = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: encoded) as? [String: Any]
+        )
+        legacyObject.removeValue(forKey: "manual_affinity_score")
+        legacyObject.removeValue(forKey: "manual_affinity_updated_at")
+        let legacyData = try JSONSerialization.data(withJSONObject: legacyObject)
+        let legacyDecoded = try JSONDecoder().decode(
+            AyaneRelationshipExport.self,
+            from: legacyData
+        )
+        XCTAssertNil(legacyDecoded.manualAffinityScore)
+        XCTAssertNil(legacyDecoded.manualAffinityUpdatedAt)
+    }
+
     private func makeDefaults() throws -> UserDefaults {
         let suiteName = "AyaneTests.DataExport.\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))

@@ -84,7 +84,7 @@ object ArchivePayloadCodec {
     }
 
     /**
-     * Reads the KMP payload and the sanitized Apple AyaneDataExport v17
+     * Reads the KMP payload and sanitized Apple AyaneDataExport v4-v18
      * payload. Apple-only records are intentionally converted/ignored by the
      * explicit compatibility adapter; KMP export remains the canonical v1
      * wire schema and is not claimed to be a byte-for-byte Apple export.

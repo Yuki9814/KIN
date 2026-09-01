@@ -1,5 +1,6 @@
 package app.kin.shared.backup
 
+import app.kin.shared.model.RelationshipStage
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
@@ -19,14 +20,34 @@ class AppleArchiveCompatibilityTest {
     }
 
     @Test
+    fun appleV18ManualAffinityIsAcceptedAndSafelyIgnored() {
+        val payload = ArchivePayloadCodec.decodePortableOrApple(appleV18Fixture())
+
+        assertTrue(payload.exportId.startsWith("apple-v18-"))
+        assertEquals(75, payload.relationships.single().affinity)
+        assertEquals(RelationshipStage.CLOSE, payload.relationships.single().stage)
+        assertFalse(ArchivePayloadCodec.encode(payload).decodeToString().contains("manual_affinity_score"))
+    }
+
+    @Test
     fun unsupportedFutureAppleSchemaFailsClosed() {
-        val future = appleV17Fixture().decodeToString()
-            .replace("\"schema_version\": 17", "\"schema_version\": 18")
+        val future = appleV18Fixture().decodeToString()
+            .replace("\"schema_version\": 18", "\"schema_version\": 19")
 
         assertFailsWith<IllegalArgumentException> {
             AppleArchiveCompatibility.decode(future.encodeToByteArray())
         }
     }
+
+    private fun appleV18Fixture(): ByteArray = appleV17Fixture().decodeToString()
+        .replace("\"schema_version\": 17", "\"schema_version\": 18")
+        .replace(
+            "\"relationships\": [],",
+            "\"relationships\": [{\"role_id\": \"11111111-1111-4111-8111-111111111111\", " +
+                "\"state_raw\": \"accepted\", \"affinity_score\": 75.0, " +
+                "\"manual_affinity_score\": 42.0}],",
+        )
+        .encodeToByteArray()
 
     private fun appleV17Fixture(): ByteArray = """
         {

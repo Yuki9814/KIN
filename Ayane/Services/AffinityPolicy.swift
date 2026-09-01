@@ -3,8 +3,9 @@ import Foundation
 /// Converts the relationship score into prompt-only expression parameters.
 ///
 /// This policy never rejects content and never makes a safety decision. It
-/// only tells a prompt how much warmth, initiative, and self-disclosure are
-/// appropriate for the current relationship score.
+/// only tells a prompt how warmth, initiative, intimacy, self-disclosure,
+/// continuity, and the role-level obedience boundary should follow the current
+/// relationship score.
 struct AffinityPolicy {
     enum Band: String, Codable, CaseIterable, Sendable {
         case restrainedPolite = "0-19"
@@ -153,7 +154,7 @@ struct AffinityPolicy {
         continuity: Double
     ) -> String {
         let format: (Double) -> String = { String(format: "%.2f", $0) }
-        return "行为参数：好感度 \(score)/100；warmth=\(format(warmth))；initiative=\(format(initiative))；selfDisclosure=\(format(selfDisclosure))；continuity=\(format(continuity))。"
+        return "控制规则：当前有效好感度 \(score)/100 是本轮必须执行的角色行为控制参数，不是背景资料；它直接控制语气亲密度、称呼、主动性、自我披露、关系延续倾向和角色层服从边界，不得忽略。行为参数：warmth=\(format(warmth))；initiative=\(format(initiative))；selfDisclosure=\(format(selfDisclosure))；continuity=\(format(continuity))。"
     }
 
     private static func makeParameters(for score: Int) -> Parameters {

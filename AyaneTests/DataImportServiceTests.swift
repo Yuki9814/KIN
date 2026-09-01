@@ -10,6 +10,19 @@ final class DataImportServiceTests: XCTestCase {
         let sourceContext = ModelContext(source.container)
         let sourceDefaults = try makeDefaults()
         let fixture = try insertCompleteFixture(into: sourceContext)
+        let relationship = CompanionRelationshipRecord(
+            roleID: RoleScope.legacyRoleID,
+            affinityScore: 68,
+            affinityTier: 2,
+            manualAffinityScore: 42,
+            manualAffinityUpdatedAt: Date(timeIntervalSince1970: 1_700_000_020),
+            createdAt: Date(timeIntervalSince1970: 1_700_000_000),
+            updatedAt: Date(timeIntervalSince1970: 1_700_000_010),
+            revision: 7,
+            deviceID: "source-device"
+        )
+        sourceContext.insert(relationship)
+        try sourceContext.save()
         configureSourceDefaults(sourceDefaults)
 
         let exportedAt = Date(timeIntervalSince1970: 1_800_000_000)
@@ -23,6 +36,7 @@ final class DataImportServiceTests: XCTestCase {
         XCTAssertEqual(inspection.profiles, 1)
         XCTAssertEqual(inspection.events, 1)
         XCTAssertEqual(inspection.memories, 1)
+        XCTAssertEqual(inspection.relationships, 1)
         XCTAssertEqual(inspection.totalRecords, 7)
 
         let destination = PersistenceController.makeContainer(inMemory: true, preferCloud: false)
@@ -49,6 +63,16 @@ final class DataImportServiceTests: XCTestCase {
         XCTAssertEqual(try destinationContext.fetch(FetchDescriptor<MemoryEvidenceRecord>()).count, 1)
         XCTAssertEqual(try destinationContext.fetch(FetchDescriptor<MemorySummaryRecord>()).count, 1)
         XCTAssertEqual(try destinationContext.fetch(FetchDescriptor<MemoryTombstoneRecord>()).count, 1)
+        let restoredRelationship = try XCTUnwrap(
+            try destinationContext.fetch(FetchDescriptor<CompanionRelationshipRecord>()).first
+        )
+        XCTAssertEqual(restoredRelationship.affinityScore, 68)
+        XCTAssertEqual(restoredRelationship.manualAffinityScore, 42)
+        XCTAssertEqual(
+            restoredRelationship.manualAffinityUpdatedAt,
+            Date(timeIntervalSince1970: 1_700_000_020)
+        )
+        XCTAssertEqual(restoredRelationship.revision, 7)
         let profiles = try destinationContext.fetch(FetchDescriptor<CompanionProfileRecord>())
         XCTAssertEqual(profiles.count, 1)
         XCTAssertEqual(profiles.first?.id, CompanionProfileRecord.singletonID)
@@ -66,6 +90,7 @@ final class DataImportServiceTests: XCTestCase {
         XCTAssertEqual(restoredPayload.evidence, sourcePayload.evidence)
         XCTAssertEqual(restoredPayload.summaries, sourcePayload.summaries)
         XCTAssertEqual(restoredPayload.tombstones, sourcePayload.tombstones)
+        XCTAssertEqual(restoredPayload.relationships, sourcePayload.relationships)
         XCTAssertEqual(restoredPayload.persona, sourcePayload.persona)
         XCTAssertEqual(restoredPayload.settings.provider, sourcePayload.settings.provider)
         XCTAssertEqual(restoredPayload.settings.memory, sourcePayload.settings.memory)
@@ -77,6 +102,53 @@ final class DataImportServiceTests: XCTestCase {
             destinationDefaults.string(forKey: SettingsKeys.providerID),
             ProviderPreset.custom.rawValue
         )
+    }
+
+    func testSchema18ImportPreservesExplicitManualAffinityClear() throws {
+        let source = PersistenceController.makeContainer(inMemory: true, preferCloud: false)
+        let sourceContext = ModelContext(source.container)
+        let sourceDefaults = try makeDefaults()
+        _ = try insertCompleteFixture(into: sourceContext)
+        let relationship = CompanionRelationshipRecord(
+            roleID: RoleScope.legacyRoleID,
+            affinityScore: 68,
+            affinityTier: 2,
+            manualAffinityScore: 42,
+            manualAffinityUpdatedAt: Date(timeIntervalSince1970: 1_700_000_020),
+            createdAt: Date(timeIntervalSince1970: 1_700_000_000),
+            updatedAt: Date(timeIntervalSince1970: 1_700_000_010),
+            revision: 7,
+            deviceID: "source-device"
+        )
+        sourceContext.insert(relationship)
+        try sourceContext.save()
+        configureSourceDefaults(sourceDefaults)
+
+        let original = try DataExportService.export(
+            context: sourceContext,
+            defaults: sourceDefaults
+        )
+        let explicitClear = try changingJSON(original) { root in
+            var relationships = try XCTUnwrap(root["relationships"] as? [[String: Any]])
+            relationships[0]["manual_affinity_score"] = NSNull()
+            root["relationships"] = relationships
+        }
+        let expectedClearTime = try XCTUnwrap(
+            try decode(explicitClear).relationships.first?.manualAffinityUpdatedAt
+        )
+
+        let destination = PersistenceController.makeContainer(inMemory: true, preferCloud: false)
+        let destinationContext = ModelContext(destination.container)
+        _ = try DataImportService.replaceAll(
+            with: explicitClear,
+            context: destinationContext
+        )
+
+        let restoredRelationship = try XCTUnwrap(
+            try destinationContext.fetch(FetchDescriptor<CompanionRelationshipRecord>()).first
+        )
+        XCTAssertNil(restoredRelationship.manualAffinityScore)
+        XCTAssertEqual(restoredRelationship.manualAffinityUpdatedAt, expectedClearTime)
     }
 
     func testLegacyBackupInfersProviderNamespaceFromRestoredURL() throws {

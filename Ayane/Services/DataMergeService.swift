@@ -527,6 +527,13 @@ struct DataMergeService {
             relationships = payload.relationships.map { item in
                 var copy = item
                 copy.roleID = normalizedRoleID(item.roleID)
+                // Schema v17 and earlier did not contain the manual-affinity
+                // stream. Its missing value is therefore "no decision", not
+                // an instruction to clear a newer destination override.
+                if payload.schemaVersion < 18 {
+                    copy.manualAffinityScore = nil
+                    copy.manualAffinityUpdatedAt = nil
+                }
                 return copy
             }
             transitions = payload.transitions.map { item in
@@ -963,10 +970,20 @@ struct DataMergeService {
             // the merge snapshot and let the duplicate reconciler collapse
             // the remaining physical rows later.
             var relationshipByRole: [UUID: CompanionRelationshipRecord] = [:]
+            var relationshipValueByRole: [UUID: AyaneRelationshipExport] = [:]
             for record in relationshipRecords {
                 let roleID = record.roleID
                 guard CompanionRelationshipState(rawValue: record.stateRaw) != nil else {
                     throw DataMergeError.invalidValue("目标关系 \(record.id) 的状态无效。")
+                }
+                let candidateValue = AyaneRelationshipExport(record)
+                if let currentValue = relationshipValueByRole[roleID] {
+                    relationshipValueByRole[roleID] = DataMergeService.newerRelationship(
+                        current: currentValue,
+                        incoming: candidateValue
+                    )
+                } else {
+                    relationshipValueByRole[roleID] = candidateValue
                 }
                 if let current = relationshipByRole[roleID] {
                     if DataMergeService.preferredRelationship(record, over: current) {
@@ -976,7 +993,7 @@ struct DataMergeService {
                     relationshipByRole[roleID] = record
                 }
             }
-            let relationshipValues = relationshipByRole.values
+            let relationshipValues = relationshipValueByRole.values
             var transitionByID: [UUID: CompanionRelationshipTransitionRecord] = [:]
             for record in transitionRecords {
                 guard CompanionRelationshipState(rawValue: record.from) != nil,
@@ -1067,7 +1084,7 @@ struct DataMergeService {
             momentPosts = momentPostValues
             momentInteractions = momentInteractionValues
             momentAIInteractionTasks = momentAIInteractionTaskValues
-            relationships = relationshipValues.map(AyaneRelationshipExport.init)
+            relationships = Array(relationshipValues)
             transitions = transitionValues.map(AyaneRelationshipTransitionExport.init)
             momentTasks = momentTaskValues.map(AyaneMomentTaskExport.init)
             conversations = conversationValues.map(AyaneConversationExport.init)
@@ -1103,7 +1120,9 @@ struct DataMergeService {
             momentAIInteractionTaskObjects = Dictionary(
                 uniqueKeysWithValues: momentAIInteractionTaskRecords.map { ($0.id, $0) }
             )
-            relationshipObjects = Dictionary(uniqueKeysWithValues: relationshipValues.map { ($0.roleID, $0) })
+            relationshipObjects = Dictionary(
+                uniqueKeysWithValues: relationshipByRole.values.map { ($0.roleID, $0) }
+            )
             transitionObjects = Dictionary(uniqueKeysWithValues: transitionValues.map { ($0.id, $0) })
             momentTaskObjects = Dictionary(uniqueKeysWithValues: momentTaskValues.map { ($0.id, $0) })
             conversationObjects = Dictionary(uniqueKeysWithValues: conversationValues.map { ($0.id, $0) })
@@ -2459,6 +2478,11 @@ struct DataMergeService {
                   (0...100).contains(item.affinityScore),
                   (0...3).contains(item.affinityTier),
                   item.affinityPolicyVersion > 0,
+                  (item.manualAffinityScore.map {
+                      $0.isFinite && (0...100).contains($0)
+                  } ?? true),
+                  item.manualAffinityUpdatedAt?.timeIntervalSince1970.isFinite ?? true,
+                  item.manualAffinityScore == nil || item.manualAffinityUpdatedAt != nil,
                   item.policyVersion > 0,
                   item.revision >= 0,
                   item.createdAt.timeIntervalSince1970.isFinite,
@@ -2905,6 +2929,11 @@ struct DataMergeService {
                   (0...100).contains(item.affinityScore),
                   (0...3).contains(item.affinityTier),
                   item.affinityPolicyVersion > 0,
+                  (item.manualAffinityScore.map {
+                      $0.isFinite && (0...100).contains($0)
+                  } ?? true),
+                  item.manualAffinityUpdatedAt?.timeIntervalSince1970.isFinite ?? true,
+                  item.manualAffinityScore == nil || item.manualAffinityUpdatedAt != nil,
                   item.policyVersion > 0,
                   item.revision >= 0,
                   item.createdAt.timeIntervalSince1970.isFinite,
@@ -4567,10 +4596,52 @@ struct DataMergeService {
             ? incoming
             : current
         var merged = relationshipWinner
+        let manualAffinityWinner: AyaneRelationshipExport
+        if current.manualAffinityUpdatedAt == nil,
+           incoming.manualAffinityUpdatedAt == nil {
+            manualAffinityWinner = relationshipWinner
+        } else {
+            manualAffinityWinner = preferredManualAffinity(incoming, over: current)
+                ? incoming
+                : current
+        }
+        merged.manualAffinityScore = manualAffinityWinner.manualAffinityScore
+        merged.manualAffinityUpdatedAt = manualAffinityWinner.manualAffinityUpdatedAt
         merged.contactMembershipRaw = contactWinner.contactMembershipRaw
         merged.contactStateUpdatedAt = contactWinner.contactStateUpdatedAt
         merged.lastUserRemovalID = contactWinner.lastUserRemovalID
         return merged
+    }
+
+    /// Manual affinity is a user-managed stream. A nil timestamp means a
+    /// legacy/default row that has never made a manual selection; it must not
+    /// beat a timestamped selection or explicit clear from another device.
+    private static func preferredManualAffinity(
+        _ lhs: AyaneRelationshipExport,
+        over rhs: AyaneRelationshipExport
+    ) -> Bool {
+        switch (lhs.manualAffinityUpdatedAt, rhs.manualAffinityUpdatedAt) {
+        case let (left?, right?) where left != right:
+            return left > right
+        case (_?, nil):
+            return true
+        case (nil, _?):
+            return false
+        case (nil, nil):
+            return false
+        default:
+            break
+        }
+        if lhs.revision != rhs.revision { return lhs.revision > rhs.revision }
+        if lhs.updatedAt != rhs.updatedAt { return lhs.updatedAt > rhs.updatedAt }
+        if lhs.deviceID != rhs.deviceID { return lhs.deviceID > rhs.deviceID }
+        let leftScore = lhs.manualAffinityScore.map {
+            String($0.bitPattern, radix: 16)
+        } ?? "nil"
+        let rightScore = rhs.manualAffinityScore.map {
+            String($0.bitPattern, radix: 16)
+        } ?? "nil"
+        return leftScore > rightScore
     }
 
     private static func preferredRelationshipContact(
@@ -4597,6 +4668,8 @@ struct DataMergeService {
             String(item.forgivenessThreshold.bitPattern, radix: 16),
             String(item.affinityScore.bitPattern, radix: 16), String(item.affinityTier),
             String(item.affinityPolicyVersion), optionalUUID(item.lastAffinityEventID),
+            item.manualAffinityScore.map { String($0.bitPattern, radix: 16) } ?? "nil",
+            optionalDate(item.manualAffinityUpdatedAt),
             String(item.dignity.bitPattern, radix: 16),
             String(item.independence.bitPattern, radix: 16),
             String(item.boundarySensitivity.bitPattern, radix: 16),
@@ -4750,6 +4823,8 @@ struct DataMergeService {
             affinityTier: item.affinityTier,
             affinityPolicyVersion: item.affinityPolicyVersion,
             lastAffinityEventID: item.lastAffinityEventID,
+            manualAffinityScore: item.manualAffinityScore,
+            manualAffinityUpdatedAt: item.manualAffinityUpdatedAt,
             dignity: item.dignity,
             independence: item.independence,
             boundarySensitivity: item.boundarySensitivity,
@@ -5097,6 +5172,8 @@ struct DataMergeService {
         record.affinityTier = item.affinityTier
         record.affinityPolicyVersion = item.affinityPolicyVersion
         record.lastAffinityEventID = item.lastAffinityEventID
+        record.manualAffinityScore = item.manualAffinityScore
+        record.manualAffinityUpdatedAt = item.manualAffinityUpdatedAt
         record.dignity = item.dignity
         record.independence = item.independence
         record.boundarySensitivity = item.boundarySensitivity

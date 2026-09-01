@@ -68,6 +68,11 @@ final class DomainServicesTests: XCTestCase {
         XCTAssertEqual(low.normalizedScore, 19)
         XCTAssertTrue(low.promptLine.contains("好感度 19/100"))
         XCTAssertTrue(low.promptLine.contains("warmth=0.18"))
+        XCTAssertTrue(low.promptLine.contains("必须执行的角色行为控制参数"))
+        XCTAssertTrue(low.promptLine.contains("语气亲密度"))
+        XCTAssertTrue(low.promptLine.contains("主动性"))
+        XCTAssertTrue(low.promptLine.contains("自我披露"))
+        XCTAssertTrue(low.promptLine.contains("角色层服从边界"))
 
         let high = AffinityPolicy.parameters(for: 99.75)
         XCTAssertEqual(high.normalizedScore, 99)
@@ -178,8 +183,13 @@ final class DomainServicesTests: XCTestCase {
 
         XCTAssertEqual(context.gap, .lessThanOneHour)
         XCTAssertEqual(context.lastValidUserMessageAt, previous)
+        XCTAssertEqual(context.localCalendarDayDistance, 1)
+        XCTAssertTrue(context.crossesLocalCalendarDay)
         XCTAssertTrue(context.promptLine.contains("2026年8月29日 23:50:00"))
         XCTAssertTrue(context.promptLine.contains("昨天，距当前约20分钟"))
+        XCTAssertTrue(context.turnBoundaryInstruction.contains("新的会话阶段"))
+        XCTAssertTrue(context.turnBoundaryInstruction.contains("‘？’"))
+        XCTAssertTrue(context.currentTurnBoundaryMetadataLine?.contains("跨日新轮次") == true)
 
         let previousLine = context.messageTimestampLine(for: previous)
         XCTAssertTrue(previousLine.contains("本地消息时间"))
@@ -190,6 +200,41 @@ final class DomainServicesTests: XCTestCase {
 
         let futureLine = context.messageTimestampLine(for: now.addingTimeInterval(60))
         XCTAssertTrue(futureLine.contains("时间异常：晚于当前时间"))
+    }
+
+    func testConversationTimeContextUsesPriorAssistantForStructuralDayBoundary() throws {
+        let zone = try XCTUnwrap(TimeZone(identifier: "Asia/Shanghai"))
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = zone
+        let previousAssistant = try XCTUnwrap(calendar.date(from: DateComponents(
+            year: 2026,
+            month: 9,
+            day: 1,
+            hour: 23,
+            minute: 50
+        )))
+        let currentTurn = try XCTUnwrap(calendar.date(from: DateComponents(
+            year: 2026,
+            month: 9,
+            day: 2,
+            hour: 0,
+            minute: 10
+        )))
+        let context = ConversationTimeContext(
+            now: currentTurn,
+            timeZone: zone,
+            messages: [ConversationTimeMessage(
+                occurredAt: previousAssistant,
+                role: .assistant
+            )],
+            currentTurnOccurredAt: currentTurn
+        )
+
+        XCTAssertNil(context.lastValidUserMessageAt)
+        XCTAssertEqual(context.lastValidConversationMessageAt, previousAssistant)
+        XCTAssertTrue(context.crossesLocalCalendarDay)
+        XCTAssertEqual(context.localCalendarDayDistance, 1)
+        XCTAssertTrue(context.turnBoundaryInstruction.contains("上一条有效会话消息"))
     }
 
     func testConversationTimeContextFormatsTheBoundWorldTimeZone() throws {
