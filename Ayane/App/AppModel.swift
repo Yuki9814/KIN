@@ -10039,9 +10039,34 @@ final class AppModel {
         let roleID = RoleScope.resolve(rawRoleID)
         let includesLegacyNilRows = roleID == RoleScope.legacyRoleID
         let userRoleRaw = EventRole.user.rawValue
+        let assistantRoleRaw = EventRole.assistant.rawValue
         let completeStateRaw = EventDeliveryState.complete.rawValue
         let currentOccurredAt = currentEvent.occurredAt
-        var descriptor = FetchDescriptor<ConversationEvent>(
+        let ordering = [
+            SortDescriptor(\ConversationEvent.occurredAt, order: .reverse),
+            SortDescriptor(\ConversationEvent.logicalTimestamp, order: .reverse),
+            SortDescriptor(\ConversationEvent.id, order: .reverse)
+        ]
+        var activityDescriptor = FetchDescriptor<ConversationEvent>(
+            predicate: #Predicate {
+                $0.conversationID == conversationID
+                    && ($0.roleID == roleID
+                        || (includesLegacyNilRows && $0.roleID == nil))
+                    && ($0.roleRaw == userRoleRaw || $0.roleRaw == assistantRoleRaw)
+                    && $0.deliveryStateRaw == completeStateRaw
+                    && !$0.redacted
+                    && $0.occurredAt <= currentOccurredAt
+            },
+            sortBy: ordering
+        )
+        activityDescriptor.fetchLimit = max(16, conflictedEventIDs.count + 2)
+        let latestActivity = ((try? context.fetch(activityDescriptor)) ?? []).first {
+            $0.id != currentUserEventID
+                && !conflictedEventIDs.contains($0.id)
+                && Self.event($0, occursBefore: currentEvent)
+        }
+
+        var userDescriptor = FetchDescriptor<ConversationEvent>(
             predicate: #Predicate {
                 $0.conversationID == conversationID
                     && ($0.roleID == roleID
@@ -10051,19 +10076,22 @@ final class AppModel {
                     && !$0.redacted
                     && $0.occurredAt <= currentOccurredAt
             },
-            sortBy: [
-                SortDescriptor(\.occurredAt, order: .reverse),
-                SortDescriptor(\.logicalTimestamp, order: .reverse),
-                SortDescriptor(\.id, order: .reverse)
-            ]
+            sortBy: ordering
         )
-        descriptor.fetchLimit = max(16, conflictedEventIDs.count + 2)
-        let previous = ((try? context.fetch(descriptor)) ?? []).first {
+        userDescriptor.fetchLimit = max(16, conflictedEventIDs.count + 2)
+        let previousUser = ((try? context.fetch(userDescriptor)) ?? []).first {
             $0.id != currentUserEventID
                 && !conflictedEventIDs.contains($0.id)
                 && Self.event($0, occursBefore: currentEvent)
         }
-        guard let previous else {
+
+        var previousEvents: [ConversationEvent] = []
+        if let latestActivity { previousEvents.append(latestActivity) }
+        if let previousUser,
+           previousEvents.allSatisfy({ $0.id != previousUser.id }) {
+            previousEvents.append(previousUser)
+        }
+        guard !previousEvents.isEmpty else {
             return timeline
                 .filter { $0.id != currentUserEventID }
                 .map {
@@ -10074,11 +10102,13 @@ final class AppModel {
                     )
                 }
         }
-        return [ConversationTimeMessage(
-            occurredAt: previous.occurredAt,
-            role: previous.role,
-            deliveryState: previous.deliveryState
-        )]
+        return previousEvents.map {
+            ConversationTimeMessage(
+                occurredAt: $0.occurredAt,
+                role: $0.role,
+                deliveryState: $0.deliveryState
+            )
+        }
     }
 
     private func scheduleAutomaticMemoryMaintenance(

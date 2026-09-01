@@ -202,6 +202,41 @@ final class DomainServicesTests: XCTestCase {
         XCTAssertTrue(futureLine.contains("时间异常：晚于当前时间"))
     }
 
+    func testConversationTimeContextUsesPriorAssistantForStructuralDayBoundary() throws {
+        let zone = try XCTUnwrap(TimeZone(identifier: "Asia/Shanghai"))
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = zone
+        let previousAssistant = try XCTUnwrap(calendar.date(from: DateComponents(
+            year: 2026,
+            month: 9,
+            day: 1,
+            hour: 23,
+            minute: 50
+        )))
+        let currentTurn = try XCTUnwrap(calendar.date(from: DateComponents(
+            year: 2026,
+            month: 9,
+            day: 2,
+            hour: 0,
+            minute: 10
+        )))
+        let context = ConversationTimeContext(
+            now: currentTurn,
+            timeZone: zone,
+            messages: [ConversationTimeMessage(
+                occurredAt: previousAssistant,
+                role: .assistant
+            )],
+            currentTurnOccurredAt: currentTurn
+        )
+
+        XCTAssertNil(context.lastValidUserMessageAt)
+        XCTAssertEqual(context.lastValidConversationMessageAt, previousAssistant)
+        XCTAssertTrue(context.crossesLocalCalendarDay)
+        XCTAssertEqual(context.localCalendarDayDistance, 1)
+        XCTAssertTrue(context.turnBoundaryInstruction.contains("上一条有效会话消息"))
+    }
+
     func testConversationTimeContextFormatsTheBoundWorldTimeZone() throws {
         let now = try XCTUnwrap(ISO8601DateFormatter().date(from: "2026-08-30T01:00:00Z"))
         let shanghai = ConversationTimeContext(

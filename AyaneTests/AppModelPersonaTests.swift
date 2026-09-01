@@ -249,6 +249,50 @@ final class AppModelPersonaTests: XCTestCase {
         XCTAssertTrue(current.content.contains("【跨日新轮次："))
     }
 
+    func testFirstUserTurnAfterYesterdayAssistantStartsNewActivePhase() async throws {
+        let (defaults, suiteName) = try makeDefaults(configureProvider: true)
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        defaults.set(false, forKey: SettingsKeys.timeInjectionEnabled)
+        let bootstrap = PersistenceController.makeContainer(inMemory: true, preferCloud: false)
+        let client = PersonaCapturingAIClient()
+        let appModel = makeAppModel(
+            bootstrap: bootstrap,
+            defaults: defaults,
+            client: client
+        )
+
+        let yesterdayReply = "这是昨天角色主动发出的消息，不应在今天继续续写。"
+        let storeContext = ModelContext(bootstrap.container)
+        storeContext.insert(ConversationEvent(
+            conversationID: appModel.currentConversation.id,
+            deviceID: "assistant-only-seed",
+            deviceSequence: 1,
+            logicalTimestamp: "assistant-only-yesterday",
+            occurredAt: Date().addingTimeInterval(-26 * 60 * 60),
+            role: .assistant,
+            content: yesterdayReply,
+            contentHash: "assistant-only-yesterday",
+            roleID: appModel.currentRoleID
+        ))
+        try storeContext.save()
+        appModel.refreshFromStore(force: true)
+
+        appModel.send("？")
+        try await waitUntil {
+            !appModel.isGenerating && client.capturedChatMessages() != nil
+        }
+
+        let captured = try XCTUnwrap(client.capturedChatMessages())
+        let system = try XCTUnwrap(captured.first(where: { $0.role == "system" }))
+        XCTAssertFalse(system.content.contains("<time_context>"))
+        XCTAssertTrue(system.content.contains("<current_turn_boundary>"))
+        XCTAssertTrue(system.content.contains(yesterdayReply))
+        let activeMessages = captured.filter { $0.role == "user" || $0.role == "assistant" }
+        XCTAssertEqual(activeMessages.map(\.role), ["user"])
+        XCTAssertTrue(activeMessages[0].content.contains("【跨日新轮次："))
+        XCTAssertTrue(activeMessages[0].content.hasSuffix("？"))
+    }
+
     func testTimeContextFindsPreviousUserBeyondVisibleMessageWindow() async throws {
         let (defaults, suiteName) = try makeDefaults(configureProvider: true)
         defer { defaults.removePersistentDomain(forName: suiteName) }

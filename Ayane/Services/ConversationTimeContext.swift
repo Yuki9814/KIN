@@ -36,8 +36,10 @@ enum ConversationTimeGap: String, Codable, CaseIterable, Sendable {
 
 /// Current local date/time plus the gap from the latest valid user turn.
 ///
-/// Only a `.user` event in `.complete` state is eligible. Failed, cancelled,
-/// streaming, and undelivered events are deliberately ignored.
+/// User-gap metrics use complete `.user` events. The structural day boundary
+/// uses the latest complete `.user` or `.assistant` event so a proactive role
+/// message from yesterday cannot remain active beside today's first user turn.
+/// Failed, cancelled, streaming, and undelivered events are ignored.
 struct ConversationTimeContext: Equatable, Sendable {
     let now: Date
     let timeZoneIdentifier: String
@@ -49,6 +51,7 @@ struct ConversationTimeContext: Equatable, Sendable {
     let currentTurnLocalDateText: String
     let currentLocalDayStart: Date
     let lastValidUserMessageAt: Date?
+    let lastValidConversationMessageAt: Date?
     let intervalSinceLastValidUserMessage: TimeInterval?
     let localCalendarDayDistance: Int?
     let crossesLocalCalendarDay: Bool
@@ -88,11 +91,18 @@ struct ConversationTimeContext: Equatable, Sendable {
         localCalendar.timeZone = timeZone
         self.currentLocalDayStart = localCalendar.startOfDay(for: resolvedTurnOccurredAt)
 
-        let lastValid = messages
+        let validConversationMessages = messages.filter {
+            ($0.role == .user || $0.role == .assistant)
+                && $0.deliveryState == .complete
+                && $0.occurredAt <= resolvedTurnOccurredAt
+        }
+        let lastValidConversation = validConversationMessages
+            .max { lhs, rhs in lhs.occurredAt < rhs.occurredAt }?
+            .occurredAt
+        self.lastValidConversationMessageAt = lastValidConversation
+        let lastValid = validConversationMessages
             .filter {
                 $0.role == .user
-                    && $0.deliveryState == .complete
-                    && $0.occurredAt <= resolvedTurnOccurredAt
             }
             .max { lhs, rhs in lhs.occurredAt < rhs.occurredAt }?
             .occurredAt
@@ -100,7 +110,7 @@ struct ConversationTimeContext: Equatable, Sendable {
 
         let interval = lastValid.map { max(0, resolvedTurnOccurredAt.timeIntervalSince($0)) }
         self.intervalSinceLastValidUserMessage = interval
-        let dayDistance = lastValid.map {
+        let dayDistance = lastValidConversation.map {
             Self.calendarDayDistance(from: $0, to: resolvedTurnOccurredAt, timeZone: timeZone)
         }
         self.localCalendarDayDistance = dayDistance
@@ -117,7 +127,7 @@ struct ConversationTimeContext: Equatable, Sendable {
         }
         self.promptLine = "时间上下文：当前日期 \(localDateText)，时间 \(localTimeText)，时区 \(timeZoneIdentifier)（\(timeZoneOffset)）；\(previousText)。"
         if let dayDistance, dayDistance > 0 {
-            self.turnBoundaryInstruction = "跨日轮次边界：当前输入与上一条有效用户消息之间已经跨过 \(dayDistance) 个本地自然日，因此当前输入是一个新的会话阶段。除非当前用户消息明确要求‘继续’、明确引用旧内容或重新点名旧话题，否则严禁续写上一日的回答、句子、清单或未完思路。即使当前消息只有‘？’、‘嗯’、‘在吗’等短内容，也不得凭相邻历史自动承接昨天；应只回应当前消息，必要时简短询问用户现在想表达什么。昨天及更早的消息和摘要只能作为历史背景。"
+            self.turnBoundaryInstruction = "跨日轮次边界：当前输入与上一条有效会话消息之间已经跨过 \(dayDistance) 个本地自然日，因此当前输入是一个新的会话阶段。除非当前用户消息明确要求‘继续’、明确引用旧内容或重新点名旧话题，否则严禁续写上一日的回答、句子、清单或未完思路。即使当前消息只有‘？’、‘嗯’、‘在吗’等短内容，也不得凭相邻历史自动承接昨天；应只回应当前消息，必要时简短询问用户现在想表达什么。昨天及更早的消息和摘要只能作为历史背景。"
         } else {
             self.turnBoundaryInstruction = ""
         }
