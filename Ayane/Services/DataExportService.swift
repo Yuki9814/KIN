@@ -9,8 +9,8 @@ import UniformTypeIdentifiers
 /// API keys deliberately do not have a representation in this type: they are
 /// kept in Keychain and are never copied into an export.
 struct AyaneDataExport: Codable, Equatable, Sendable {
-    /// v18 adds the optional manual affinity override while retaining v17
-    /// Moments interaction tombstones and all earlier compatibility fields.
+    /// v18 adds the optional manual affinity override and its independent
+    /// update timestamp while retaining v17 Moments interaction tombstones.
     /// The singular `worldProfile` projection remains on the wire for older
     /// readers.
     static let currentSchemaVersion = 18
@@ -1624,6 +1624,7 @@ struct AyaneRelationshipExport: Codable, Equatable, Sendable {
     var affinityPolicyVersion: Int
     var lastAffinityEventID: UUID?
     var manualAffinityScore: Double?
+    var manualAffinityUpdatedAt: Date?
     var dignity: Double
     var independence: Double
     var boundarySensitivity: Double
@@ -1657,6 +1658,7 @@ struct AyaneRelationshipExport: Codable, Equatable, Sendable {
         case affinityPolicyVersion = "affinity_policy_version"
         case lastAffinityEventID = "last_affinity_event_id"
         case manualAffinityScore = "manual_affinity_score"
+        case manualAffinityUpdatedAt = "manual_affinity_updated_at"
         case dignity
         case independence
         case boundarySensitivity = "boundary_sensitivity"
@@ -1690,6 +1692,7 @@ struct AyaneRelationshipExport: Codable, Equatable, Sendable {
             affinityPolicyVersion: record.affinityPolicyVersion,
             lastAffinityEventID: record.lastAffinityEventID,
             manualAffinityScore: record.manualAffinityScore,
+            manualAffinityUpdatedAt: record.manualAffinityUpdatedAt,
             dignity: record.dignity,
             independence: record.independence,
             boundarySensitivity: record.boundarySensitivity,
@@ -1723,6 +1726,7 @@ struct AyaneRelationshipExport: Codable, Equatable, Sendable {
         affinityPolicyVersion: Int = 1,
         lastAffinityEventID: UUID? = nil,
         manualAffinityScore: Double? = nil,
+        manualAffinityUpdatedAt: Date? = nil,
         dignity: Double = 0.5,
         independence: Double = 0.5,
         boundarySensitivity: Double = 0.5,
@@ -1753,6 +1757,8 @@ struct AyaneRelationshipExport: Codable, Equatable, Sendable {
         self.affinityPolicyVersion = affinityPolicyVersion
         self.lastAffinityEventID = lastAffinityEventID
         self.manualAffinityScore = manualAffinityScore
+        self.manualAffinityUpdatedAt = manualAffinityUpdatedAt
+            ?? (manualAffinityScore == nil ? nil : updatedAt)
         self.dignity = dignity
         self.independence = independence
         self.boundarySensitivity = boundarySensitivity
@@ -1795,9 +1801,11 @@ struct AyaneRelationshipExport: Codable, Equatable, Sendable {
             forKey: .affinityPolicyVersion
         ) ?? 1
         lastAffinityEventID = try container.decodeIfPresent(UUID.self, forKey: .lastAffinityEventID)
-        manualAffinityScore = try container.decodeIfPresent(
-            Double.self,
-            forKey: .manualAffinityScore
+        let manualAffinityKeyIsPresent = container.contains(.manualAffinityScore)
+        manualAffinityScore = try container.decodeIfPresent(Double.self, forKey: .manualAffinityScore)
+        manualAffinityUpdatedAt = try container.decodeIfPresent(
+            Date.self,
+            forKey: .manualAffinityUpdatedAt
         )
         dignity = try container.decodeIfPresent(Double.self, forKey: .dignity) ?? 0.5
         independence = try container.decodeIfPresent(Double.self, forKey: .independence) ?? 0.5
@@ -1825,6 +1833,10 @@ struct AyaneRelationshipExport: Codable, Equatable, Sendable {
             forKey: .contactStateUpdatedAt
         ) ?? updatedAt
         lastUserRemovalID = try container.decodeIfPresent(UUID.self, forKey: .lastUserRemovalID)
+        if manualAffinityUpdatedAt == nil,
+           manualAffinityScore != nil || manualAffinityKeyIsPresent {
+            manualAffinityUpdatedAt = updatedAt
+        }
     }
 
     func encode(to encoder: Encoder) throws {
@@ -1841,7 +1853,12 @@ struct AyaneRelationshipExport: Codable, Equatable, Sendable {
         try container.encode(affinityTier, forKey: .affinityTier)
         try container.encode(affinityPolicyVersion, forKey: .affinityPolicyVersion)
         try container.encodeIfPresent(lastAffinityEventID, forKey: .lastAffinityEventID)
-        try container.encodeIfPresent(manualAffinityScore, forKey: .manualAffinityScore)
+        if let manualAffinityScore {
+            try container.encode(manualAffinityScore, forKey: .manualAffinityScore)
+        } else if manualAffinityUpdatedAt != nil {
+            try container.encodeNil(forKey: .manualAffinityScore)
+        }
+        try container.encodeIfPresent(manualAffinityUpdatedAt, forKey: .manualAffinityUpdatedAt)
         try container.encode(dignity, forKey: .dignity)
         try container.encode(independence, forKey: .independence)
         try container.encode(boundarySensitivity, forKey: .boundarySensitivity)
@@ -3521,6 +3538,11 @@ struct DataExportService {
                 let contactWinner = relationshipContactIsPreferred(candidate, over: current)
                     ? candidate
                     : current
+                let manualWinner = relationshipManualAffinityIsPreferred(candidate, over: current)
+                    ? candidate
+                    : current
+                winner.manualAffinityScore = manualWinner.manualAffinityScore
+                winner.manualAffinityUpdatedAt = manualWinner.manualAffinityUpdatedAt
                 winner.contactMembershipRaw = contactWinner.contactMembershipRaw
                 winner.contactStateUpdatedAt = contactWinner.contactStateUpdatedAt
                 winner.lastUserRemovalID = contactWinner.lastUserRemovalID
@@ -3532,6 +3554,32 @@ struct DataExportService {
         return winners.keys
             .sorted { $0.uuidString < $1.uuidString }
             .compactMap { winners[$0] }
+    }
+
+    private static func relationshipManualAffinityIsPreferred(
+        _ lhs: AyaneRelationshipExport,
+        over rhs: AyaneRelationshipExport
+    ) -> Bool {
+        switch (lhs.manualAffinityUpdatedAt, rhs.manualAffinityUpdatedAt) {
+        case let (left?, right?) where left != right:
+            return left > right
+        case (_?, nil):
+            return true
+        case (nil, _?), (nil, nil):
+            return false
+        default:
+            break
+        }
+        if lhs.revision != rhs.revision { return lhs.revision > rhs.revision }
+        if lhs.updatedAt != rhs.updatedAt { return lhs.updatedAt > rhs.updatedAt }
+        if lhs.deviceID != rhs.deviceID { return lhs.deviceID > rhs.deviceID }
+        let leftScore = lhs.manualAffinityScore.map {
+            String($0.bitPattern, radix: 16)
+        } ?? "nil"
+        let rightScore = rhs.manualAffinityScore.map {
+            String($0.bitPattern, radix: 16)
+        } ?? "nil"
+        return leftScore > rightScore
     }
 
     /// Transitions are append-only. Keep every distinct ID in the export and

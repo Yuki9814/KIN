@@ -519,6 +519,16 @@ struct DataImportService {
                 )
             }
             normalized.transitions = []
+        } else {
+            normalized.relationships = payload.relationships.map { item in
+                var copy = item
+                copy.roleID = normalizedRoleID(item.roleID)
+                if payload.schemaVersion < 18 {
+                    copy.manualAffinityScore = nil
+                    copy.manualAffinityUpdatedAt = nil
+                }
+                return copy
+            }
         }
         return normalized
     }
@@ -696,6 +706,9 @@ struct DataImportService {
                   (relationship.manualAffinityScore.map {
                       $0.isFinite && (0...100).contains($0)
                   } ?? true),
+                  relationship.manualAffinityUpdatedAt?.timeIntervalSince1970.isFinite ?? true,
+                  relationship.manualAffinityScore == nil
+                      || relationship.manualAffinityUpdatedAt != nil,
                   relationship.dignity.isFinite,
                   (0...1).contains(relationship.dignity),
                   relationship.independence.isFinite,
@@ -1566,6 +1579,7 @@ struct DataImportService {
             affinityPolicyVersion: item.affinityPolicyVersion,
             lastAffinityEventID: item.lastAffinityEventID,
             manualAffinityScore: item.manualAffinityScore,
+            manualAffinityUpdatedAt: item.manualAffinityUpdatedAt,
             dignity: item.dignity,
             independence: item.independence,
             boundarySensitivity: item.boundarySensitivity,

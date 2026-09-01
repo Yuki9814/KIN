@@ -29,10 +29,10 @@ struct PersistenceBootstrap {
 }
 
 enum PersistenceController {
-    // v18 adds CompanionRelationshipRecord.manualAffinityScore. Keep
-    // this independent from the wire export version: a local SwiftData store
-    // must receive a pre-migration backup even when older export readers can
-    // safely ignore the new optional field.
+    // v18 adds the manual-affinity value and its independent update timestamp.
+    // Keep this independent from the wire export version: a local SwiftData
+    // store must receive a pre-migration backup even when older export readers
+    // can safely ignore the new optional fields.
     private static let currentSchemaVersion = 18
     private static let migrationBackupVersionKey = "persistence.localMigrationBackupVersion"
 

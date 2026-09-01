@@ -52,9 +52,10 @@ AyaneDataExport schema versions 4 through 18 as a one-way input adapter:
   profile is filtered because KMP provisions it locally.
 - relationships uses affinity_score (or the legacy tier) and maps to the KMP
   stage thresholds. Schema v18 may additionally contain the optional
-  `manual_affinity_score`; KMP's RelationshipState has no manual-affinity
-  field, so the adapter safely ignores that value and does not claim to
-  preserve it for an Apple round-trip.
+  `manual_affinity_score` and `manual_affinity_updated_at`; KMP's
+  RelationshipState has no manual-affinity stream, so the adapter safely
+  ignores those values and does not claim to preserve them for an Apple
+  round-trip.
 - events become append-only MESSAGE records. role/role_raw, delivery state,
   parent event and ISO-8601 timestamps are retained.
 - Base64 image_data and file_data become private hashed attachment

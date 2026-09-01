@@ -759,6 +759,11 @@ final class CompanionRelationshipRecord {
     /// behavior policy. The automatic score remains intact underneath so the
     /// user can return to automatic progression without losing history.
     var manualAffinityScore: Double?
+    /// Independent user-managed stream timestamp. A non-nil value records
+    /// either a manual score selection or an explicit return to automatic.
+    /// Legacy rows remain nil so unrelated relationship updates cannot erase
+    /// a newer manual choice during merge or duplicate reconciliation.
+    var manualAffinityUpdatedAt: Date?
     var dignity: Double = 0.5
     var independence: Double = 0.5
     var boundarySensitivity: Double = 0.5
@@ -793,6 +798,7 @@ final class CompanionRelationshipRecord {
         affinityPolicyVersion: Int = 1,
         lastAffinityEventID: UUID? = nil,
         manualAffinityScore: Double? = nil,
+        manualAffinityUpdatedAt: Date? = nil,
         dignity: Double = 0.5,
         independence: Double = 0.5,
         boundarySensitivity: Double = 0.5,
@@ -825,6 +831,8 @@ final class CompanionRelationshipRecord {
         self.manualAffinityScore = manualAffinityScore.flatMap {
             $0.isFinite ? min(100, max(0, $0)) : nil
         }
+        self.manualAffinityUpdatedAt = manualAffinityUpdatedAt
+            ?? (self.manualAffinityScore == nil ? nil : updatedAt)
         self.dignity = dignity
         self.independence = independence
         self.boundarySensitivity = boundarySensitivity
@@ -859,6 +867,7 @@ final class CompanionRelationshipRecord {
         affinityPolicyVersion: Int = 1,
         lastAffinityEventID: UUID? = nil,
         manualAffinityScore: Double? = nil,
+        manualAffinityUpdatedAt: Date? = nil,
         dignity: Double = 0.5,
         independence: Double = 0.5,
         boundarySensitivity: Double = 0.5,
@@ -891,6 +900,8 @@ final class CompanionRelationshipRecord {
         self.manualAffinityScore = manualAffinityScore.flatMap {
             $0.isFinite ? min(100, max(0, $0)) : nil
         }
+        self.manualAffinityUpdatedAt = manualAffinityUpdatedAt
+            ?? (self.manualAffinityScore == nil ? nil : updatedAt)
         self.dignity = dignity
         self.independence = independence
         self.boundarySensitivity = boundarySensitivity

@@ -39,9 +39,10 @@ import kotlin.math.roundToInt
  * `moment_interactions.deleted_at` field therefore remains an Apple-side
  * sticky tombstone: it is not converted into a live KMP record, and the
  * adapter cannot resurrect it during import. Schema v18's optional
- * `relationships.manual_affinity_score` field is also ignored: KMP has no
+ * `relationships.manual_affinity_score` and
+ * `manual_affinity_updated_at` fields are also ignored: KMP has no
  * manual-affinity slot, so this one-way adapter uses only `affinity_score`
- * (or the legacy tier) and does not claim to preserve the override.
+ * (or the legacy tier) and does not claim to preserve the override stream.
  */
 object AppleArchiveCompatibility {
     private const val minAppleSchema = 4
@@ -91,10 +92,10 @@ object AppleArchiveCompatibility {
             ).joinToString(" ").lowercase()
             val archived = stateRaw.contains("archiv") || stateRaw.contains("retir") ||
                 relationship.string("retired_at") != null || stateRaw.contains("removed")
-            // Schema v18 adds manual_affinity_score, but RelationshipState has
-            // no field for it. Keep the automatic score/tier only; importing
-            // the override here would falsely imply that an Apple round-trip
-            // can preserve it.
+            // Schema v18 adds the manual score and its update timestamp, but
+            // RelationshipState has no fields for that stream. Keep the
+            // automatic score/tier only; importing the override here would
+            // falsely imply that an Apple round-trip can preserve it.
             val affinity = (relationship.double("affinity_score")
                 ?: relationship.int("affinity_tier")?.times(20.0)
                 ?: 0.0).roundToInt().coerceIn(0, 100)

@@ -833,9 +833,11 @@ final class AppModel {
         }
         let relationship = try ensureRelationshipRecord(for: roleID)
         let normalized = score.rounded()
+        let now = Date()
         relationship.manualAffinityScore = normalized
+        relationship.manualAffinityUpdatedAt = now
         relationship.affinityPolicyVersion = max(1, relationship.affinityPolicyVersion)
-        relationship.updatedAt = Date()
+        relationship.updatedAt = now
         relationship.revision = max(0, relationship.revision) + 1
         relationship.deviceID = deviceID
         do {
@@ -852,8 +854,10 @@ final class AppModel {
     func clearManualAffinityScore(for roleID: UUID) throws {
         guard let relationship = try relationshipRecord(for: roleID),
               relationship.manualAffinityScore != nil else { return }
+        let now = Date()
         relationship.manualAffinityScore = nil
-        relationship.updatedAt = Date()
+        relationship.manualAffinityUpdatedAt = now
+        relationship.updatedAt = now
         relationship.revision = max(0, relationship.revision) + 1
         relationship.deviceID = deviceID
         do {

@@ -234,6 +234,9 @@ enum StoreDuplicateReconciler {
     private struct RelationshipPlan {
         let winner: CompanionRelationshipRecord
         let duplicates: [CompanionRelationshipRecord]
+        let manualAffinityScore: Double?
+        let manualAffinityUpdatedAt: Date?
+        let changes: Bool
     }
 
     private struct TransitionPlan {
@@ -514,7 +517,12 @@ enum StoreDuplicateReconciler {
         let relationshipExports = relationships
             .filter { !plannedRelationshipRoles.contains($0.roleID) }
             .map(AyaneRelationshipExport.init)
-            + plan.relationships.map { AyaneRelationshipExport($0.winner) }
+            + plan.relationships.map { item in
+                var export = AyaneRelationshipExport(item.winner)
+                export.manualAffinityScore = item.manualAffinityScore
+                export.manualAffinityUpdatedAt = item.manualAffinityUpdatedAt
+                return export
+            }
         let transitionExports = transitions
             .filter { !plannedTransitionIDs.contains($0.id) }
             .map(AyaneRelationshipTransitionExport.init)
@@ -1073,13 +1081,15 @@ enum StoreDuplicateReconciler {
 
         var relationshipCount = StoreDuplicateEntityReconcileCount()
         for item in plan.relationships {
+            item.winner.manualAffinityScore = item.manualAffinityScore
+            item.winner.manualAffinityUpdatedAt = item.manualAffinityUpdatedAt
             for duplicate in item.duplicates {
                 context.delete(duplicate)
             }
             relationshipCount = add(
                 relationshipCount,
                 removed: item.duplicates.count,
-                updated: 0
+                updated: item.changes ? 1 : 0
             )
         }
 
@@ -1541,9 +1551,17 @@ enum StoreDuplicateReconciler {
         let winner = records.reduce(first) { current, candidate in
             preferredRelationship(candidate, over: current) ? candidate : current
         }
+        let manualWinner = records.reduce(winner) { current, candidate in
+            preferredManualAffinity(candidate, over: current) ? candidate : current
+        }
+        let manualAffinityUpdatedAt = effectiveManualAffinityUpdatedAt(manualWinner)
         return RelationshipPlan(
             winner: winner,
-            duplicates: records.filter { $0 !== winner }
+            duplicates: records.filter { $0 !== winner },
+            manualAffinityScore: manualWinner.manualAffinityScore,
+            manualAffinityUpdatedAt: manualAffinityUpdatedAt,
+            changes: winner.manualAffinityScore != manualWinner.manualAffinityScore
+                || winner.manualAffinityUpdatedAt != manualAffinityUpdatedAt
         )
     }
 
@@ -1566,6 +1584,7 @@ enum StoreDuplicateReconciler {
               (record.manualAffinityScore.map {
                   $0.isFinite && (0...100).contains($0)
               } ?? true),
+              record.manualAffinityUpdatedAt?.timeIntervalSince1970.isFinite ?? true,
               record.dignity.isFinite,
               (0...1).contains(record.dignity),
               record.independence.isFinite,
@@ -1611,6 +1630,45 @@ enum StoreDuplicateReconciler {
         if lhs.createdAt != rhs.createdAt { return lhs.createdAt > rhs.createdAt }
         if lhs.deviceID != rhs.deviceID { return lhs.deviceID > rhs.deviceID }
         return uuidKey(lhs.id) < uuidKey(rhs.id)
+    }
+
+    private static func preferredManualAffinity(
+        _ lhs: CompanionRelationshipRecord,
+        over rhs: CompanionRelationshipRecord
+    ) -> Bool {
+        switch (
+            effectiveManualAffinityUpdatedAt(lhs),
+            effectiveManualAffinityUpdatedAt(rhs)
+        ) {
+        case let (left?, right?) where left != right:
+            return left > right
+        case (_?, nil):
+            return true
+        case (nil, _?):
+            return false
+        case (nil, nil):
+            return false
+        default:
+            break
+        }
+        if lhs.revision != rhs.revision { return lhs.revision > rhs.revision }
+        if lhs.updatedAt != rhs.updatedAt { return lhs.updatedAt > rhs.updatedAt }
+        if lhs.deviceID != rhs.deviceID { return lhs.deviceID > rhs.deviceID }
+        let leftScore = lhs.manualAffinityScore.map {
+            String($0.bitPattern, radix: 16)
+        } ?? "nil"
+        let rightScore = rhs.manualAffinityScore.map {
+            String($0.bitPattern, radix: 16)
+        } ?? "nil"
+        if leftScore != rightScore { return leftScore > rightScore }
+        return uuidKey(lhs.id) < uuidKey(rhs.id)
+    }
+
+    private static func effectiveManualAffinityUpdatedAt(
+        _ record: CompanionRelationshipRecord
+    ) -> Date? {
+        record.manualAffinityUpdatedAt
+            ?? (record.manualAffinityScore == nil ? nil : record.updatedAt)
     }
 
     private static func transitionPlan(
