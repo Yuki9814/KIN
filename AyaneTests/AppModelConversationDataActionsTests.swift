@@ -5,6 +5,89 @@ import XCTest
 
 @MainActor
 final class AppModelConversationDataActionsTests: XCTestCase {
+    func testDeletedDefaultChatReopenedFromContactsSurvivesModelRestart() async throws {
+        let fixture = try makeFixture()
+        defer { fixture.defaults.removePersistentDomain(forName: fixture.suiteName) }
+        XCTAssertEqual(fixture.appModel.currentConversation.id, AppModel.defaultConversationID)
+        try await assertDeletedChatReopensPersistently(fixture, roleID: RoleScope.legacyRoleID)
+    }
+
+    func testReopeningDeletedDefaultChatExcludesGroupAnchors() async throws {
+        let fixture = try makeFixture()
+        defer { fixture.defaults.removePersistentDomain(forName: fixture.suiteName) }
+        let firstRole = try fixture.appModel.createCompanion(name: "群友甲", userName: "你", prompt: "甲")
+        let secondRole = try fixture.appModel.createCompanion(name: "群友乙", userName: "你", prompt: "乙")
+        let groupID = try fixture.appModel.createGroup(
+            name: "不应被选为单聊的群", participantRoleIDs: [firstRole, secondRole]
+        )
+        try await assertDeletedChatReopensPersistently(fixture, roleID: RoleScope.legacyRoleID)
+        XCTAssertNotEqual(fixture.appModel.currentConversation.id, groupID)
+    }
+
+    func testDeletedCustomCompanionChatReopenedFromContactsSurvivesModelRestart() async throws {
+        let fixture = try makeFixture()
+        defer { fixture.defaults.removePersistentDomain(forName: fixture.suiteName) }
+        let roleID = try fixture.appModel.createCompanion(
+            name: "重新聊天的好友", userName: "你", prompt: "保持简短回复"
+        )
+        try await assertDeletedChatReopensPersistently(fixture, roleID: roleID)
+    }
+
+    private func assertDeletedChatReopensPersistently(_ fixture: Fixture, roleID: UUID) async throws {
+        fixture.defaults.set("https://unit.test/v1", forKey: SettingsKeys.baseURL)
+        fixture.defaults.set("fixture-model", forKey: SettingsKeys.model)
+        fixture.defaults.set(false, forKey: SettingsKeys.streamResponses)
+        try fixture.appModel.selectCompanion(id: roleID)
+        let archivedID = fixture.appModel.currentConversation.id
+        let context = ModelContext(fixture.bootstrap.container)
+        let oldMessage = makeEvent(
+            conversationID: archivedID, roleID: roleID, role: .user,
+            text: "删除列表前的旧会话", index: 1, at: Date(timeIntervalSince1970: 80)
+        )
+        context.insert(oldMessage)
+        try context.save()
+        fixture.appModel.refreshFromStore(force: true)
+
+        try fixture.appModel.removeDirectConversationFromChatList(roleID: roleID)
+        XCTAssertNil(fixture.appModel.activeDirectConversationID(roleID: roleID))
+        // Contacts invokes selectCompanion without a specific conversation ID.
+        try fixture.appModel.selectCompanion(id: roleID)
+        let reopenedID = fixture.appModel.currentConversation.id
+        XCTAssertNotEqual(reopenedID, archivedID)
+        XCTAssertFalse(fixture.appModel.currentConversation.archived)
+        XCTAssertEqual(fixture.appModel.activeDirectConversationID(roleID: roleID), reopenedID)
+        XCTAssertFalse(fixture.appModel.messages.contains { $0.id == oldMessage.id })
+
+        fixture.appModel.send("从通讯录重新开始聊天")
+        try await waitUntil { !fixture.appModel.isGenerating }
+        fixture.appModel.refreshFromStore(force: true)
+        XCTAssertEqual(fixture.appModel.activeDirectConversationID(roleID: roleID), reopenedID)
+        XCTAssertEqual(
+            fixture.appModel.directConversationActivity(roleID: roleID)?.preview,
+            "从通讯录重新开始聊天"
+        )
+
+        let restarted = AppModel(
+            bootstrap: fixture.bootstrap,
+            client: NoopConversationActionClient(),
+            memoryIndex: LocalMemorySearchIndex(inMemory: true),
+            conversationIndex: LocalConversationSearchIndex(inMemory: true),
+            dataDefaults: fixture.defaults,
+            apiKeyLoader: { "fixture-key" }
+        )
+        restarted.refreshFromStore(force: true)
+        XCTAssertEqual(restarted.activeDirectConversationID(roleID: roleID), reopenedID)
+        XCTAssertEqual(restarted.currentConversation.id, reopenedID)
+        XCTAssertFalse(restarted.currentConversation.archived)
+        XCTAssertEqual(restarted.directConversationActivity(roleID: roleID)?.preview, "从通讯录重新开始聊天")
+        XCTAssertTrue(restarted.messages.contains { $0.content == "从通讯录重新开始聊天" })
+        let rows = try ModelContext(fixture.bootstrap.container).fetch(FetchDescriptor<ConversationRecord>())
+        XCTAssertEqual(rows.filter { $0.id == archivedID }.count, 1)
+        XCTAssertTrue(try XCTUnwrap(rows.first { $0.id == archivedID }).archived)
+        XCTAssertEqual(rows.filter { $0.id == reopenedID && !$0.archived }.count, 1)
+        withExtendedLifetime(restarted) {}
+    }
+
     func testRecallRejectsOlderUserMessageAndKeepsAssistantReply() throws {
         let fixture = try makeFixture()
         defer { fixture.defaults.removePersistentDomain(forName: fixture.suiteName) }

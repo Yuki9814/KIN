@@ -427,6 +427,20 @@ final class ChatTurnPresentationResumeTests: XCTestCase {
         XCTAssertEqual(client.chatRequests, 1)
         XCTAssertEqual(client.cancelledRequests, 0)
 
+        // Completion while detached must still publish the durable group
+        // activity and unread projections used by the home chat list.
+        XCTAssertEqual(
+            appModel.groupConversationActivity(conversationID: groupID)?.preview,
+            "离开群聊页后仍然完成。"
+        )
+        XCTAssertEqual(
+            appModel.groupConversations.first(where: { $0.conversationID == groupID })?.updatedAt,
+            appModel.groupConversationActivity(conversationID: groupID)?.lastActivityAt
+        )
+        // Completion must also republish the group's unread projection while
+        // the group screen is detached.
+        XCTAssertNotNil(appModel.conversationUnreadCounts[groupID])
+
         appModel.openGroup(conversationID: groupID)
         XCTAssertEqual(appModel.activeGroupConversationID, groupID)
         XCTAssertFalse(appModel.isGeneratingGroupReply)
@@ -521,6 +535,103 @@ final class ChatTurnPresentationResumeTests: XCTestCase {
         }
         XCTAssertTrue(assistants.isEmpty)
         XCTAssertEqual(appModel.activeGroupConversationID, groupID)
+    }
+
+    func testOpeningDifferentGroupCancelsDetachedStartupPresentationQueue() async throws {
+        let (defaults, suiteName) = try makeDefaults()
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let bootstrap = PersistenceController.makeContainer(inMemory: true, preferCloud: false)
+        let initial = AppModel(
+            bootstrap: bootstrap,
+            client: ResumeNoopAIClient(),
+            memoryIndex: LocalMemorySearchIndex(inMemory: true),
+            conversationIndex: LocalConversationSearchIndex(inMemory: true),
+            dataDefaults: defaults,
+            apiKeyLoader: { "fixture-key" }
+        )
+        let (oldGroupID, oldResponderID) = try makeTestGroup(initial, name: "恢复旧群")
+        let (newGroupID, _) = try makeTestGroup(initial, name: "恢复新群")
+        let context = ModelContext(bootstrap.container)
+        let parentID = UUID()
+        let assistantID = UUID()
+        let presentationID = UUID()
+        let now = Date(timeIntervalSince1970: 80)
+        context.insert(ConversationEvent(
+            id: parentID,
+            conversationID: oldGroupID,
+            deviceID: "resume-device",
+            deviceSequence: 8,
+            logicalTimestamp: "008",
+            occurredAt: now,
+            role: .user,
+            content: "恢复旧群消息",
+            contentHash: ContentHasher.sha256("恢复旧群消息"),
+            deliveryState: .complete
+        ))
+        context.insert(ConversationEvent(
+            id: assistantID,
+            conversationID: oldGroupID,
+            deviceID: "resume-device",
+            deviceSequence: 9,
+            logicalTimestamp: "009",
+            occurredAt: now.addingTimeInterval(1),
+            role: .assistant,
+            content: "旧群第一段。",
+            contentHash: ContentHasher.sha256("旧群第一段。"),
+            parentEventID: parentID,
+            deliveryState: .streaming,
+            roleID: oldResponderID,
+            senderRoleID: oldResponderID
+        ))
+        context.insert(ChatTurnPresentationRecord(
+            id: presentationID,
+            conversationID: oldGroupID,
+            roleID: oldResponderID,
+            logicalReplyEventID: assistantID,
+            segments: ["旧群第一段。", "旧群隐藏段。"],
+            displayProgress: 0.5,
+            displayedSegmentCount: 1,
+            state: .delivering,
+            plannedAt: now,
+            startedAt: now,
+            idempotencyKey: "group-reply:\(parentID.uuidString.lowercased()):\(oldResponderID.uuidString.lowercased())",
+            createdAt: now,
+            updatedAt: now,
+            revision: 2,
+            deviceID: "resume-device"
+        ))
+        try context.save()
+        withExtendedLifetime(initial) {}
+
+        let resumed = AppModel(
+            bootstrap: bootstrap,
+            client: ResumeNoopAIClient(),
+            memoryIndex: LocalMemorySearchIndex(inMemory: true),
+            conversationIndex: LocalConversationSearchIndex(inMemory: true),
+            dataDefaults: defaults,
+            apiKeyLoader: { "fixture-key" }
+        )
+        resumed.closeGroup()
+        resumed.openGroup(conversationID: newGroupID)
+        XCTAssertEqual(resumed.activeGroupConversationID, newGroupID)
+        XCTAssertFalse(resumed.isGeneratingGroupReply)
+
+        try await waitUntil {
+            let rows = (try? context.fetch(FetchDescriptor<ChatTurnPresentationRecord>())) ?? []
+            return rows.first(where: { $0.id == presentationID })?.state == .cancelled
+        }
+        let presentation = try XCTUnwrap(
+            try context.fetch(FetchDescriptor<ChatTurnPresentationRecord>())
+                .first { $0.id == presentationID }
+        )
+        XCTAssertEqual(presentation.state, .cancelled)
+        let assistants = try context.fetch(FetchDescriptor<ConversationEvent>()).filter {
+            $0.conversationID == oldGroupID && $0.role == .assistant
+        }
+        XCTAssertEqual(assistants.count, 1)
+        XCTAssertEqual(assistants.first?.content, "旧群第一段。")
+        XCTAssertEqual(assistants.first?.deliveryState, .complete)
+        withExtendedLifetime(resumed) {}
     }
 
     private func makeTestGroup(

@@ -610,14 +610,21 @@ final class AppModel {
             sortBy: [SortDescriptor(\.updatedAt, order: .reverse)]
         )
         let conversations = (try? context.fetch(conversationDescriptor)) ?? []
+        let groupConversationIDs = Set(
+            ((try? context.fetch(FetchDescriptor<GroupConversationRecord>())) ?? [])
+                .map(\.conversationID)
+        )
         if let primary = conversations.first(where: {
             $0.id == Self.defaultConversationID
                 && $0.resolvedRoleID == RoleScope.legacyRoleID
         }) {
-            self.currentConversation = primary
+            self.currentConversation = Self.preferredLegacyDirectConversation(
+                in: conversations, excluding: groupConversationIDs
+            ) ?? primary
         } else if conversations.count == 1,
                   let legacy = conversations.first,
-                  legacy.resolvedRoleID == RoleScope.legacyRoleID {
+                  legacy.resolvedRoleID == RoleScope.legacyRoleID,
+                  !groupConversationIDs.contains(legacy.id) {
             // A store from the first prototype may contain exactly one random
             // conversation ID. It is safe to migrate that one record, along
             // with its event foreign keys, without touching any other history.
@@ -635,6 +642,10 @@ final class AppModel {
             }
             try? context.save()
             self.currentConversation = legacy
+        } else if let activeLegacy = Self.preferredLegacyDirectConversation(
+            in: conversations, excluding: groupConversationIDs
+        ) {
+            self.currentConversation = activeLegacy
         } else {
             // With no conversations (or several legacy conversations), start a
             // new deterministic primary session and leave unrelated history
@@ -1904,6 +1915,22 @@ final class AppModel {
         ))
     }
 
+    /// A reopened legacy chat may have a new UUID while its first session stays
+    /// archived. Startup and restore must bind the visible direct session;
+    /// group anchor records also resolve to the legacy role and are excluded.
+    private static func preferredLegacyDirectConversation(
+        in conversations: [ConversationRecord],
+        excluding groupConversationIDs: Set<UUID>
+    ) -> ConversationRecord? {
+        let direct = conversations.filter {
+            $0.resolvedRoleID == RoleScope.legacyRoleID
+                && !groupConversationIDs.contains($0.id)
+        }
+        return direct.first { !$0.archived && $0.id == defaultConversationID }
+            ?? direct.first { !$0.archived }
+            ?? direct.first { $0.id == defaultConversationID }
+    }
+
     /// Switches every role-owned observable and derived index as one operation.
     /// Re-selecting the already active conversation is intentionally idempotent:
     /// navigation may destroy and recreate `ChatView`, but that must not cancel
@@ -1927,8 +1954,12 @@ final class AppModel {
             ]
         )
         let conversations = try context.fetch(descriptor)
+        let groupConversationIDs = Set(
+            try context.fetch(FetchDescriptor<GroupConversationRecord>()).map(\.conversationID)
+        )
         let roleConversations = conversations.filter {
             $0.resolvedRoleID == resolvedRoleID && !$0.archived
+                && !groupConversationIDs.contains($0.id)
         }
         let conversation: ConversationRecord
         if let preferredConversationID,
@@ -1940,10 +1971,13 @@ final class AppModel {
         } else if let existing = roleConversations.first {
             conversation = existing
         } else {
+            // The deterministic ID belongs to the first legacy session. Once
+            // that session is archived, Contacts must create a distinct session
+            // rather than a duplicate row that reconciliation will hide again.
+            let canUseDefaultID = resolvedRoleID == RoleScope.legacyRoleID
+                && !conversations.contains { $0.id == Self.defaultConversationID }
             conversation = ConversationRecord(
-                id: resolvedRoleID == RoleScope.legacyRoleID
-                    ? Self.defaultConversationID
-                    : UUID(),
+                id: canUseDefaultID ? Self.defaultConversationID : UUID(),
                 title: configuration.name,
                 roleID: resolvedRoleID
             )
@@ -3457,12 +3491,24 @@ final class AppModel {
             // A real group switch must invalidate the old request even when
             // its screen was already detached and the UI selection is nil.
             cancelActiveGroupTurnForInterruption(conversationID: groupRequestConversationID)
-        } else if groupRequestConversationID == nil,
-                  let activeGroupConversationID,
-                  activeGroupConversationID != conversationID {
-            // There may still be a resumable presentation queue for the
-            // previously visible group even though no provider request owns it.
-            cancelActiveGroupTurnForInterruption(conversationID: activeGroupConversationID)
+        } else if groupRequestConversationID == nil {
+            // Startup-resumed presentations have no provider request to retain
+            // their group identity. Once closeGroup() detaches the projection,
+            // use the durable queue itself to find and cancel stale groups on a
+            // real group switch while preserving a queue for this same group.
+            var staleGroupIDs = pendingGroupPresentationConversationIDs()
+            staleGroupIDs.remove(conversationID)
+            if let activeGroupConversationID,
+               activeGroupConversationID != conversationID {
+                staleGroupIDs.insert(activeGroupConversationID)
+                if groupGenerationTask != nil || activeGroupUserEventID != nil {
+                    cancelActiveGroupTurnForInterruption(
+                        conversationID: activeGroupConversationID
+                    )
+                    staleGroupIDs.remove(activeGroupConversationID)
+                }
+            }
+            cancelGroupPresentationQueues(for: staleGroupIDs)
         }
         activeGroupConversationID = conversationID
         isGeneratingGroupReply = groupRequestConversationID == conversationID
@@ -5698,9 +5744,12 @@ final class AppModel {
                 sortBy: [SortDescriptor(\.updatedAt, order: .reverse)]
             )
             let conversations = try context.fetch(conversationDescriptor)
-            guard let restoredConversation = conversations.first(where: {
-                $0.id == Self.defaultConversationID
-            }) ?? conversations.first else {
+            let groupConversationIDs = Set(
+                try context.fetch(FetchDescriptor<GroupConversationRecord>()).map(\.conversationID)
+            )
+            guard let restoredConversation = Self.preferredLegacyDirectConversation(
+                in: conversations, excluding: groupConversationIDs
+            ) ?? conversations.first(where: { !groupConversationIDs.contains($0.id) }) else {
                 throw DataImportError.invalidValue("恢复后找不到主会话")
             }
             currentConversation = restoredConversation
@@ -6175,6 +6224,18 @@ final class AppModel {
         }
     }
 
+    private func cancelGroupPresentationQueues(for conversationIDs: Set<UUID>) {
+        guard !conversationIDs.isEmpty else { return }
+        cancelPresentationTasks { record in
+            self.isGroupPresentation(record)
+                && conversationIDs.contains(record.conversationID)
+        }
+        cancelPresentationRecords { record in
+            self.isGroupPresentation(record)
+                && conversationIDs.contains(record.conversationID)
+        }
+    }
+
     private func refreshPresentationProjections(
         for record: ChatTurnPresentationRecord
     ) {
@@ -6182,7 +6243,13 @@ final class AppModel {
         if isGroupPresentation(record) {
             if activeGroupConversationID == record.conversationID {
                 reloadGroupMessages(conversationID: record.conversationID)
+            } else {
+                // A group reply can finish while its screen is detached. Keep
+                // the home list and its activity projection current as soon as
+                // the durable presentation reaches a terminal state.
+                reloadGroupConversations()
             }
+            refreshUnreadState()
         } else if currentConversation.id == record.conversationID,
                   RoleScope.resolve(record.roleID) == currentRoleID {
             reloadMessages()
@@ -6196,6 +6263,14 @@ final class AppModel {
                 && $0.conversationID == conversationID
                 && !$0.state.isTerminal
         }
+    }
+
+    private func pendingGroupPresentationConversationIDs() -> Set<UUID> {
+        Set(
+            chatTurnPresentations()
+                .filter { isGroupPresentation($0) && !$0.state.isTerminal }
+                .map(\.conversationID)
+        )
     }
 
     private func refreshPresentationGeneratingFlags() {
@@ -7529,10 +7604,7 @@ final class AppModel {
         presentation.updatedAt = Date()
         presentation.revision += 1
         try context.save()
-        presentationRevision &+= 1
-        if activeGroupConversationID == conversationID {
-            reloadGroupMessages(conversationID: conversationID)
-        }
+        refreshPresentationProjections(for: presentation)
     }
 
     private func groupPromptConversationContext(
@@ -12711,28 +12783,40 @@ final class AppModel {
         _ event: ConversationEvent,
         conversationID: UUID
     ) {
-        guard activeGroupConversationID == conversationID,
-              event.conversationID == conversationID,
+        guard event.conversationID == conversationID,
               !event.redacted,
               !conflictedEventIDs.contains(event.id) else {
             return
         }
-        var visible = groupMessages
-        let wasBoundedWindow = visible.count <= Self.messageWindowSize
-        if let index = visible.firstIndex(where: { $0.id == event.id }) {
-            visible[index] = event
-        } else {
-            visible.append(event)
-            visible.sort(by: Self.conversationEventIsEarlier)
-            if wasBoundedWindow, visible.count > Self.messageWindowSize {
-                visible.removeFirst(visible.count - Self.messageWindowSize)
+        if activeGroupConversationID == conversationID {
+            var visible = groupMessages
+            let wasBoundedWindow = visible.count <= Self.messageWindowSize
+            if let index = visible.firstIndex(where: { $0.id == event.id }) {
+                visible[index] = event
+            } else {
+                visible.append(event)
+                visible.sort(by: Self.conversationEventIsEarlier)
+                if wasBoundedWindow, visible.count > Self.messageWindowSize {
+                    visible.removeFirst(visible.count - Self.messageWindowSize)
+                }
             }
+            groupMessages = visible
+            if let latest = visible.last {
+                groupConversationActivities[conversationID] = ConversationListActivitySummary(
+                    preview: latest.content.trimmingCharacters(in: .whitespacesAndNewlines),
+                    lastActivityAt: latest.occurredAt
+                )
+            }
+            return
         }
-        groupMessages = visible
-        if let latest = visible.last {
+
+        // Keep the detached home-list preview current without binding the old
+        // transcript back to the newly selected group.
+        if groupConversationActivities[conversationID]?.lastActivityAt ?? .distantPast
+            <= event.occurredAt {
             groupConversationActivities[conversationID] = ConversationListActivitySummary(
-                preview: latest.content.trimmingCharacters(in: .whitespacesAndNewlines),
-                lastActivityAt: latest.occurredAt
+                preview: event.content.trimmingCharacters(in: .whitespacesAndNewlines),
+                lastActivityAt: event.occurredAt
             )
         }
     }
