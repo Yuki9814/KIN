@@ -371,6 +371,179 @@ final class ChatTurnPresentationResumeTests: XCTestCase {
         XCTAssertEqual(client.cancelledRequests, 0)
     }
 
+    func testClosingAndReopeningGroupKeepsInFlightReplyAlive() async throws {
+        let (defaults, suiteName) = try makeDefaults()
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let bootstrap = PersistenceController.makeContainer(inMemory: true, preferCloud: false)
+        let client = ResumeControlledAIClient(reply: "离开群聊页后仍然完成。")
+        let appModel = AppModel(
+            bootstrap: bootstrap,
+            client: client,
+            memoryIndex: LocalMemorySearchIndex(inMemory: true),
+            conversationIndex: LocalConversationSearchIndex(inMemory: true),
+            dataDefaults: defaults,
+            apiKeyLoader: { "fixture-key" }
+        )
+        let (groupID, responderID) = try makeTestGroup(appModel, name: "群聊离开重进")
+        let context = ModelContext(bootstrap.container)
+
+        appModel.openGroup(conversationID: groupID)
+        appModel.sendGroupMessage(
+            "请慢慢想",
+            conversationID: groupID,
+            mentionedRoleIDs: [responderID]
+        )
+        try await waitUntil {
+            client.chatRequests == 1 && appModel.isGeneratingGroupReply
+        }
+
+        appModel.closeGroup()
+        XCTAssertNil(appModel.activeGroupConversationID)
+        XCTAssertFalse(appModel.isGeneratingGroupReply)
+        XCTAssertEqual(client.cancelledRequests, 0)
+
+        appModel.openGroup(conversationID: groupID)
+        XCTAssertTrue(appModel.isGeneratingGroupReply)
+        appModel.closeGroup()
+        XCTAssertNil(appModel.activeGroupConversationID)
+        XCTAssertFalse(appModel.isGeneratingGroupReply)
+        client.releaseReply()
+
+        try await waitUntil {
+            appModel.activeGroupConversationID == nil
+                && !appModel.isGeneratingGroupReply
+                && ((try? context.fetch(FetchDescriptor<ConversationEvent>())) ?? [])
+                    .contains {
+                        $0.conversationID == groupID
+                            && $0.role == .assistant
+                            && $0.deliveryState == .complete
+                            && $0.content == "离开群聊页后仍然完成。"
+                    }
+        }
+        let assistants = try context.fetch(FetchDescriptor<ConversationEvent>()).filter {
+            $0.conversationID == groupID && $0.role == .assistant
+        }
+        XCTAssertEqual(assistants.count, 1)
+        XCTAssertEqual(client.chatRequests, 1)
+        XCTAssertEqual(client.cancelledRequests, 0)
+
+        appModel.openGroup(conversationID: groupID)
+        XCTAssertEqual(appModel.activeGroupConversationID, groupID)
+        XCTAssertFalse(appModel.isGeneratingGroupReply)
+        let reopenedAssistants = try context.fetch(FetchDescriptor<ConversationEvent>()).filter {
+            $0.conversationID == groupID && $0.role == .assistant
+        }
+        XCTAssertEqual(reopenedAssistants.count, 1)
+        XCTAssertEqual(reopenedAssistants.first?.content, "离开群聊页后仍然完成。")
+    }
+
+    func testOpeningDifferentGroupCancelsDetachedGroupRequest() async throws {
+        let (defaults, suiteName) = try makeDefaults()
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let bootstrap = PersistenceController.makeContainer(inMemory: true, preferCloud: false)
+        let client = ResumeControlledAIClient(reply: "旧群回复不应写入新群。")
+        let appModel = AppModel(
+            bootstrap: bootstrap,
+            client: client,
+            memoryIndex: LocalMemorySearchIndex(inMemory: true),
+            conversationIndex: LocalConversationSearchIndex(inMemory: true),
+            dataDefaults: defaults,
+            apiKeyLoader: { "fixture-key" }
+        )
+        let (oldGroupID, oldResponderID) = try makeTestGroup(appModel, name: "旧群")
+        let (newGroupID, _) = try makeTestGroup(appModel, name: "新群")
+        let context = ModelContext(bootstrap.container)
+
+        appModel.openGroup(conversationID: oldGroupID)
+        appModel.sendGroupMessage(
+            "旧群慢回复",
+            conversationID: oldGroupID,
+            mentionedRoleIDs: [oldResponderID]
+        )
+        try await waitUntil {
+            client.chatRequests == 1 && appModel.isGeneratingGroupReply
+        }
+
+        appModel.closeGroup()
+        appModel.openGroup(conversationID: newGroupID)
+        XCTAssertEqual(appModel.activeGroupConversationID, newGroupID)
+        XCTAssertFalse(appModel.isGeneratingGroupReply)
+        client.releaseReply()
+
+        try await waitUntil {
+            client.cancelledRequests == 1
+        }
+        let oldAssistants = try context.fetch(FetchDescriptor<ConversationEvent>()).filter {
+            $0.conversationID == oldGroupID && $0.role == .assistant
+        }
+        let newAssistants = try context.fetch(FetchDescriptor<ConversationEvent>()).filter {
+            $0.conversationID == newGroupID && $0.role == .assistant
+        }
+        XCTAssertTrue(oldAssistants.isEmpty)
+        XCTAssertTrue(newAssistants.isEmpty)
+        XCTAssertEqual(client.chatRequests, 1)
+    }
+
+    func testStoppingGroupGeneratingCancelsTheOwnedRequest() async throws {
+        let (defaults, suiteName) = try makeDefaults()
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let bootstrap = PersistenceController.makeContainer(inMemory: true, preferCloud: false)
+        let client = ResumeControlledAIClient(reply: "这条群回复应被停止。")
+        let appModel = AppModel(
+            bootstrap: bootstrap,
+            client: client,
+            memoryIndex: LocalMemorySearchIndex(inMemory: true),
+            conversationIndex: LocalConversationSearchIndex(inMemory: true),
+            dataDefaults: defaults,
+            apiKeyLoader: { "fixture-key" }
+        )
+        let (groupID, responderID) = try makeTestGroup(appModel, name: "群聊停止")
+        let context = ModelContext(bootstrap.container)
+
+        appModel.openGroup(conversationID: groupID)
+        appModel.sendGroupMessage(
+            "请暂停",
+            conversationID: groupID,
+            mentionedRoleIDs: [responderID]
+        )
+        try await waitUntil {
+            client.chatRequests == 1 && appModel.isGeneratingGroupReply
+        }
+
+        appModel.stopGroupGenerating()
+        XCTAssertFalse(appModel.isGeneratingGroupReply)
+        client.releaseReply()
+        try await waitUntil {
+            client.cancelledRequests == 1
+        }
+        let assistants = try context.fetch(FetchDescriptor<ConversationEvent>()).filter {
+            $0.conversationID == groupID && $0.role == .assistant
+        }
+        XCTAssertTrue(assistants.isEmpty)
+        XCTAssertEqual(appModel.activeGroupConversationID, groupID)
+    }
+
+    private func makeTestGroup(
+        _ appModel: AppModel,
+        name: String
+    ) throws -> (groupID: UUID, responderID: UUID) {
+        let firstRoleID = try appModel.createCompanion(
+            name: "\(name)甲",
+            userName: "你",
+            prompt: "只回复群聊消息"
+        )
+        let secondRoleID = try appModel.createCompanion(
+            name: "\(name)乙",
+            userName: "你",
+            prompt: "只回复群聊消息"
+        )
+        let groupID = try appModel.createGroup(
+            name: name,
+            participantRoleIDs: [firstRoleID, secondRoleID]
+        )
+        return (groupID, firstRoleID)
+    }
+
     private func makeDefaults() throws -> (UserDefaults, String) {
         let suiteName = "ChatTurnPresentationResumeTests.\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))

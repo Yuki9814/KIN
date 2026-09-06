@@ -37,6 +37,7 @@ struct SettingsView: View {
     }
 
     private let mode: Mode
+    private static let appInstallationInfo = AppInstallationInfo.current()
 
     init(mode: Mode = .all) {
         self.mode = mode
@@ -421,6 +422,32 @@ struct SettingsView: View {
                         self.dataManagementMessage = nil
                     }
                 }
+                }
+
+                Section("关于 KIN") {
+                    LabeledContent(
+                        "版本",
+                        value: Self.appInstallationInfo.marketingVersionText
+                    )
+                    LabeledContent(
+                        "构建号",
+                        value: Self.appInstallationInfo.bundleVersionText
+                    )
+
+                    #if os(iOS)
+                    if let expirationDate = Self.appInstallationInfo.expirationDate {
+                        LabeledContent(
+                            "本次安装有效期",
+                            value: expirationDate.formatted(
+                                date: .abbreviated,
+                                time: .shortened
+                            )
+                        )
+                        Text("到期前请连接 Mac，在 Xcode 中更新并重新安装 KIN。")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    #endif
                 }
             }
         }

@@ -32,21 +32,18 @@ struct RootView: View {
             appModel.conversationCareAppActivityDidChange(
                 isActive: scenePhase == .active
             )
-            if scenePhase == .active {
-                appModel.refreshFromStore(
-                    force: true,
-                    migrateImportedIdentity: true
-                )
-                appModel.processDueMomentTasks()
-                appModel.processDueMemoryMaintenance()
-                appModel.processDueProactiveTasks()
-            }
         }
         .task(id: scenePhase) {
             appModel.conversationCareAppActivityDidChange(
                 isActive: scenePhase == .active
             )
             guard scenePhase == .active else { return }
+            // One activation pass owns refresh and scheduling. The synchronous
+            // onChange above only stops foreground care when leaving the app.
+            appModel.refreshFromStore(
+                force: true,
+                migrateImportedIdentity: true
+            )
             appModel.processDueMomentTasks()
             appModel.processDueMemoryMaintenance()
             appModel.processDueProactiveTasks()

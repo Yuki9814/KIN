@@ -117,6 +117,7 @@ struct WeChatSearchBar: View {
                 }
                 .foregroundStyle(AppTheme.secondaryText)
                 .allowsHitTesting(false)
+                .accessibilityHidden(true)
             }
         }
         .frame(height: 36)

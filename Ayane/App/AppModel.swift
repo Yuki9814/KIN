@@ -360,6 +360,8 @@ final class AppModel {
     private(set) var groupConversationActivities: [UUID: ConversationListActivitySummary] = [:]
     private(set) var pinnedConversationIDs: Set<UUID> = []
     private(set) var manuallyUnreadConversationIDs: Set<UUID> = []
+    /// The group currently bound to the visible group-chat projection. This
+    /// can be nil while an app-owned group request continues in the background.
     private(set) var activeGroupConversationID: UUID?
     private(set) var groupMessages: [ConversationEvent] = []
     private(set) var isGeneratingGroupReply = false
@@ -466,6 +468,10 @@ final class AppModel {
     @ObservationIgnored private let imageGenerationAPIKeyLoader: () throws -> String?
     @ObservationIgnored private var generationTask: Task<Void, Never>?
     @ObservationIgnored private var groupGenerationTask: Task<Void, Never>?
+    /// Group identity owned by the in-flight provider turn. Keep this separate
+    /// from `activeGroupConversationID`: leaving the screen only detaches the
+    /// projection, while opening a different group still cancels this turn.
+    @ObservationIgnored private var groupRequestConversationID: UUID?
     /// Presentation is durable, but the sleeper that advances a queue is
     /// process-local. Keep one handle per record so a restart, role switch,
     /// or user interruption can stop every resumed queue without creating a
@@ -1524,7 +1530,8 @@ final class AppModel {
             throw AppModelGroupError.participantUnavailable
         }
 
-        if activeGroupConversationID == conversationID {
+        if activeGroupConversationID == conversationID
+            || groupRequestConversationID == conversationID {
             cancelActiveGroupTurnForInterruption(conversationID: conversationID)
         } else {
             cancelPresentationTasks { record in
@@ -1561,7 +1568,8 @@ final class AppModel {
             throw AppModelGroupError.ownerPermissionRequired
         }
 
-        if activeGroupConversationID == conversationID {
+        if activeGroupConversationID == conversationID
+            || groupRequestConversationID == conversationID {
             cancelActiveGroupTurnForInterruption(conversationID: conversationID)
         } else {
             cancelPresentationTasks { record in
@@ -1969,8 +1977,10 @@ final class AppModel {
         if generationTask != nil || isGenerating || activeChatUserEventID != nil {
             cancelActiveChatTurnForInterruption()
         }
-        if groupGenerationTask != nil || isGeneratingGroupReply || activeGroupUserEventID != nil,
-           let activeGroupConversationID {
+        if let groupRequestConversationID {
+            cancelActiveGroupTurnForInterruption(conversationID: groupRequestConversationID)
+        } else if groupGenerationTask != nil || isGeneratingGroupReply || activeGroupUserEventID != nil,
+                  let activeGroupConversationID {
             cancelActiveGroupTurnForInterruption(conversationID: activeGroupConversationID)
         }
 
@@ -3442,36 +3452,41 @@ final class AppModel {
         guard groupConversations.contains(where: { $0.conversationID == conversationID }) else {
             return
         }
-        if let activeGroupConversationID {
-            if activeGroupConversationID != conversationID {
-                cancelActiveGroupTurnForInterruption(conversationID: activeGroupConversationID)
-            } else if groupGenerationTask != nil || activeGroupUserEventID != nil {
-                cancelActiveGroupTurnForInterruption(conversationID: conversationID)
-            }
+        if let groupRequestConversationID,
+           groupRequestConversationID != conversationID {
+            // A real group switch must invalidate the old request even when
+            // its screen was already detached and the UI selection is nil.
+            cancelActiveGroupTurnForInterruption(conversationID: groupRequestConversationID)
+        } else if groupRequestConversationID == nil,
+                  let activeGroupConversationID,
+                  activeGroupConversationID != conversationID {
+            // There may still be a resumable presentation queue for the
+            // previously visible group even though no provider request owns it.
+            cancelActiveGroupTurnForInterruption(conversationID: activeGroupConversationID)
         }
-        groupGenerationTask?.cancel()
-        groupGenerationTask = nil
         activeGroupConversationID = conversationID
-        isGeneratingGroupReply = hasPendingGroupPresentation(for: conversationID)
+        isGeneratingGroupReply = groupRequestConversationID == conversationID
+            || hasPendingGroupPresentation(for: conversationID)
         reloadGroupMessages(conversationID: conversationID)
     }
 
     func closeGroup() {
-        if let activeGroupConversationID {
-            cancelActiveGroupTurnForInterruption(conversationID: activeGroupConversationID)
-        }
-        groupGenerationTask?.cancel()
-        groupGenerationTask = nil
+        // Navigation only detaches the projection. The provider task and its
+        // durable presentation queue remain owned by AppModel until the user
+        // explicitly stops it or opens a different group.
         isGeneratingGroupReply = false
         activeGroupConversationID = nil
         groupMessages = []
     }
 
     func stopGroupGenerating() {
-        if let activeGroupConversationID {
+        if let groupRequestConversationID {
+            cancelActiveGroupTurnForInterruption(conversationID: groupRequestConversationID)
+        } else if let activeGroupConversationID {
+            // A resumed presentation may have no provider task, but Stop must
+            // still cancel that visible group's durable queue.
             cancelActiveGroupTurnForInterruption(conversationID: activeGroupConversationID)
         }
-        groupGenerationTask?.cancel()
     }
 
     func sendGroupMessage(
@@ -3548,6 +3563,7 @@ final class AppModel {
         isGeneratingGroupReply = true
         groupTurnGeneration &+= 1
         let turnGeneration = groupTurnGeneration
+        groupRequestConversationID = conversationID
         activeGroupUserEventID = pokeEvent.id
         errorMessage = nil
         groupGenerationTask = Task { @MainActor [weak self] in
@@ -3695,6 +3711,7 @@ final class AppModel {
         isGeneratingGroupReply = true
         groupTurnGeneration &+= 1
         let turnGeneration = groupTurnGeneration
+        groupRequestConversationID = conversationID
         activeGroupUserEventID = userEvent.id
         errorMessage = nil
         groupGenerationTask = Task { @MainActor [weak self] in
@@ -6529,13 +6546,18 @@ final class AppModel {
         presentationGeneration &+= 1
         groupGenerationTask?.cancel()
         groupGenerationTask = nil
-        let targetIDs = Set([conversationID, activeGroupConversationID].compactMap { $0 })
+        let targetIDs = Set([
+            conversationID,
+            groupRequestConversationID,
+            activeGroupConversationID
+        ].compactMap { $0 })
         cancelPresentationTasks { record in
             self.isGroupPresentation(record) && targetIDs.contains(record.conversationID)
         }
         cancelPresentationRecords { record in
             self.isGroupPresentation(record) && targetIDs.contains(record.conversationID)
         }
+        groupRequestConversationID = nil
         activeGroupUserEventID = nil
         if let activeGroupConversationID,
            targetIDs.contains(activeGroupConversationID) {
@@ -6551,6 +6573,7 @@ final class AppModel {
         generationTask = nil
         groupGenerationTask?.cancel()
         groupGenerationTask = nil
+        groupRequestConversationID = nil
         for task in presentationTasks.values { task.cancel() }
         presentationTasks.removeAll()
         if markPending {
@@ -7174,6 +7197,7 @@ final class AppModel {
         do {
             guard generation == dataGeneration,
                   turnGeneration == groupTurnGeneration,
+                  groupRequestConversationID == conversationID,
                   integrityConflict == nil else {
                 throw CancellationError()
             }
@@ -7223,7 +7247,7 @@ final class AppModel {
                 guard turnGeneration == groupTurnGeneration else {
                     throw CancellationError()
                 }
-                guard activeGroupConversationID == conversationID else {
+                guard groupRequestConversationID == conversationID else {
                     throw CancellationError()
                 }
                 let connection = try resolvedAIConnection(for: roleID)
@@ -7248,7 +7272,7 @@ final class AppModel {
                 }
                 guard generation == dataGeneration,
                       turnGeneration == groupTurnGeneration,
-                      activeGroupConversationID == conversationID,
+                      groupRequestConversationID == conversationID,
                       integrityConflict == nil else {
                     throw CancellationError()
                 }
@@ -7262,7 +7286,7 @@ final class AppModel {
                     : []
                 guard generation == dataGeneration,
                       turnGeneration == groupTurnGeneration,
-                      activeGroupConversationID == conversationID,
+                      groupRequestConversationID == conversationID,
                       integrityConflict == nil else {
                     throw CancellationError()
                 }
@@ -7323,6 +7347,7 @@ final class AppModel {
                         try Task.checkCancellation()
                         guard generation == dataGeneration,
                               turnGeneration == groupTurnGeneration,
+                              groupRequestConversationID == conversationID,
                               integrityConflict == nil else {
                             throw CancellationError()
                         }
@@ -7338,7 +7363,7 @@ final class AppModel {
                 }
                 guard generation == dataGeneration,
                       turnGeneration == groupTurnGeneration,
-                      activeGroupConversationID == conversationID,
+                      groupRequestConversationID == conversationID,
                       integrityConflict == nil else {
                     throw CancellationError()
                 }
@@ -7364,25 +7389,32 @@ final class AppModel {
             }
             scheduleGroupMemoryMaintenance()
             guard turnGeneration == groupTurnGeneration,
-                  activeGroupConversationID == conversationID else { return }
-            isGeneratingGroupReply = false
+                  groupRequestConversationID == conversationID else { return }
             groupGenerationTask = nil
+            groupRequestConversationID = nil
             activeGroupUserEventID = nil
-            reloadGroupMessages(conversationID: conversationID)
-        } catch is CancellationError {
-            guard turnGeneration == groupTurnGeneration else { return }
             if activeGroupConversationID == conversationID {
                 isGeneratingGroupReply = false
-                groupGenerationTask = nil
-                activeGroupUserEventID = nil
+                reloadGroupMessages(conversationID: conversationID)
+            }
+        } catch is CancellationError {
+            guard turnGeneration == groupTurnGeneration,
+                  groupRequestConversationID == conversationID else { return }
+            groupGenerationTask = nil
+            groupRequestConversationID = nil
+            activeGroupUserEventID = nil
+            if activeGroupConversationID == conversationID {
+                isGeneratingGroupReply = false
                 reloadGroupMessages(conversationID: conversationID)
             }
         } catch {
-            guard turnGeneration == groupTurnGeneration else { return }
+            guard turnGeneration == groupTurnGeneration,
+                  groupRequestConversationID == conversationID else { return }
+            groupGenerationTask = nil
+            groupRequestConversationID = nil
+            activeGroupUserEventID = nil
             if activeGroupConversationID == conversationID {
                 isGeneratingGroupReply = false
-                groupGenerationTask = nil
-                activeGroupUserEventID = nil
                 errorMessage = error.localizedDescription
                 reloadGroupMessages(conversationID: conversationID)
             }
@@ -7498,7 +7530,9 @@ final class AppModel {
         presentation.revision += 1
         try context.save()
         presentationRevision &+= 1
-        reloadGroupMessages(conversationID: conversationID)
+        if activeGroupConversationID == conversationID {
+            reloadGroupMessages(conversationID: conversationID)
+        }
     }
 
     private func groupPromptConversationContext(
@@ -12393,20 +12427,26 @@ final class AppModel {
         let active = MemoryState.active.rawValue
         let roleID = currentRoleID
         let includesLegacyNilRows = roleID == RoleScope.legacyRoleID
+        let memoryPredicate = #Predicate<MemoryAssertionRecord> { memory in
+            memory.stateRaw == active
+                && (memory.roleID == roleID
+                    || (includesLegacyNilRows && memory.roleID == nil))
+                && (memory.embeddingData == nil || memory.embeddingModelID != embeddingModelID)
+        }
         var descriptor = FetchDescriptor<MemoryAssertionRecord>(
-            predicate: #Predicate {
-                $0.stateRaw == active
-                    && ($0.roleID == roleID
-                        || (includesLegacyNilRows && $0.roleID == nil))
-                    && ($0.embeddingData == nil || $0.embeddingModelID != embeddingModelID)
-            },
+            predicate: memoryPredicate,
             sortBy: [SortDescriptor(\.updatedAt, order: .reverse)]
         )
         // Tombstone filtering can discard a few stale CloudKit copies. Fetch a
         // small bounded surplus rather than materializing the complete library
         // just to create at most `limit` embeddings.
         descriptor.fetchLimit = max(1, min(max(limit * 3, limit), 50))
-        guard let memories = try? context.fetch(descriptor) else { return }
+        let memories: [MemoryAssertionRecord]
+        do {
+            memories = try context.fetch(descriptor)
+        } catch {
+            return
+        }
         var completed = 0
         for candidate in memories {
             guard generation == dataGeneration,
@@ -12417,8 +12457,11 @@ final class AppModel {
                 id: candidate.id,
                 roleID: roleID,
                 context: context
-            ), memory.state == .active,
-               memory.embeddingData == nil || memory.embeddingModelID != embeddingModelID else {
+            ) else {
+                continue
+            }
+            guard memory.state == MemoryState.active,
+                  memory.embeddingData == nil || memory.embeddingModelID != embeddingModelID else {
                 continue
             }
             guard isCurrentAcceptedRelationshipForMemory(roleID: currentRoleID) else { return }
