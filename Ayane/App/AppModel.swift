@@ -642,10 +642,6 @@ final class AppModel {
             }
             try? context.save()
             self.currentConversation = legacy
-        } else if let activeLegacy = Self.preferredLegacyDirectConversation(
-            in: conversations, excluding: groupConversationIDs
-        ) {
-            self.currentConversation = activeLegacy
         } else {
             // With no conversations (or several legacy conversations), start a
             // new deterministic primary session and leave unrelated history
