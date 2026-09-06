@@ -2,7 +2,7 @@
 
 KIN 是一个公开源码的跨端 AI 关系伴侣项目。Apple 端使用 SwiftUI 与 SwiftData；Android 与 Windows 端使用 Kotlin Multiplatform/Compose。项目的默认内置角色只有绫音，角色、关系、聊天事件与长期记忆均按稳定标识隔离。
 
-当前源码版本为 `0.1.5`：Apple 构建号 `37`，Android `versionCode 5`；Windows 应用显示版本同为 `0.1.5`，仅因 jpackage 不接受主版本号 0，MSI/EXE 的原生安装器字段映射为 `1.1.5`。
+当前源码版本为 `0.1.5`：Apple 构建号 `38`，Android `versionCode 5`；Windows 应用显示版本同为 `0.1.5`，仅因 jpackage 不接受主版本号 0，MSI/EXE 的原生安装器字段映射为 `1.1.5`。
 
 仓库地址：[Yuki9814/KIN](https://github.com/Yuki9814/KIN)。源码、构建产物、签名材料、真实 provider 凭据、设备数据和本机日志不混在一起；二进制只在 GitHub Release 生成，不提交到 Git。
 
@@ -60,6 +60,9 @@ KIN 是一个公开源码的跨端 AI 关系伴侣项目。Apple 端使用 Swift
 - 加密可移植备份：不包含 API Key、OAuth 凭据或设备标识
 - 附件内容按 SHA-256 校验；平台密钥存储不进入仓库、备份或 CloudKit
 - Apple 端支持可选的私有 CloudKit 同步；关闭时保持仅本机模式
+- Apple 端退出群聊页面后，当前回复继续生成；返回同一群聊可继续查看，切换群聊或点击停止会取消原回复
+- Apple 端从首页删除单聊后，通讯录可重新开启独立会话；新会话在重启后仍会显示，旧会话保留为归档历史
+- Apple 端设置显示版本与构建号；iOS 安装包包含可读取的描述文件时，还会显示本次安装有效期
 
 ## GitHub Release 下载
 

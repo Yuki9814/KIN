@@ -60,6 +60,8 @@ struct WeChatConversationListView: View {
     let openSettings: () -> Void
 
     var body: some View {
+        let items = chatListItems
+
         VStack(spacing: 0) {
             WeChatRootHeader(
                 title: "微信",
@@ -96,12 +98,12 @@ struct WeChatConversationListView: View {
                     .listRowInsets(.init())
                     .listRowSeparator(.hidden)
 
-                if chatListItems.isEmpty {
+                if items.isEmpty {
                     noResults
                         .listRowInsets(.init())
                         .listRowSeparator(.hidden)
                 } else {
-                    ForEach(chatListItems) { item in
+                    ForEach(items) { item in
                         chatListRow(item)
                             .listRowInsets(.init())
                             .listRowSeparator(.hidden)

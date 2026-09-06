@@ -360,6 +360,8 @@ final class AppModel {
     private(set) var groupConversationActivities: [UUID: ConversationListActivitySummary] = [:]
     private(set) var pinnedConversationIDs: Set<UUID> = []
     private(set) var manuallyUnreadConversationIDs: Set<UUID> = []
+    /// The group currently bound to the visible group-chat projection. This
+    /// can be nil while an app-owned group request continues in the background.
     private(set) var activeGroupConversationID: UUID?
     private(set) var groupMessages: [ConversationEvent] = []
     private(set) var isGeneratingGroupReply = false
@@ -466,6 +468,10 @@ final class AppModel {
     @ObservationIgnored private let imageGenerationAPIKeyLoader: () throws -> String?
     @ObservationIgnored private var generationTask: Task<Void, Never>?
     @ObservationIgnored private var groupGenerationTask: Task<Void, Never>?
+    /// Group identity owned by the in-flight provider turn. Keep this separate
+    /// from `activeGroupConversationID`: leaving the screen only detaches the
+    /// projection, while opening a different group still cancels this turn.
+    @ObservationIgnored private var groupRequestConversationID: UUID?
     /// Presentation is durable, but the sleeper that advances a queue is
     /// process-local. Keep one handle per record so a restart, role switch,
     /// or user interruption can stop every resumed queue without creating a
@@ -604,14 +610,21 @@ final class AppModel {
             sortBy: [SortDescriptor(\.updatedAt, order: .reverse)]
         )
         let conversations = (try? context.fetch(conversationDescriptor)) ?? []
+        let groupConversationIDs = Set(
+            ((try? context.fetch(FetchDescriptor<GroupConversationRecord>())) ?? [])
+                .map(\.conversationID)
+        )
         if let primary = conversations.first(where: {
             $0.id == Self.defaultConversationID
                 && $0.resolvedRoleID == RoleScope.legacyRoleID
         }) {
-            self.currentConversation = primary
+            self.currentConversation = Self.preferredLegacyDirectConversation(
+                in: conversations, excluding: groupConversationIDs
+            ) ?? primary
         } else if conversations.count == 1,
                   let legacy = conversations.first,
-                  legacy.resolvedRoleID == RoleScope.legacyRoleID {
+                  legacy.resolvedRoleID == RoleScope.legacyRoleID,
+                  !groupConversationIDs.contains(legacy.id) {
             // A store from the first prototype may contain exactly one random
             // conversation ID. It is safe to migrate that one record, along
             // with its event foreign keys, without touching any other history.
@@ -1524,7 +1537,8 @@ final class AppModel {
             throw AppModelGroupError.participantUnavailable
         }
 
-        if activeGroupConversationID == conversationID {
+        if activeGroupConversationID == conversationID
+            || groupRequestConversationID == conversationID {
             cancelActiveGroupTurnForInterruption(conversationID: conversationID)
         } else {
             cancelPresentationTasks { record in
@@ -1561,7 +1575,8 @@ final class AppModel {
             throw AppModelGroupError.ownerPermissionRequired
         }
 
-        if activeGroupConversationID == conversationID {
+        if activeGroupConversationID == conversationID
+            || groupRequestConversationID == conversationID {
             cancelActiveGroupTurnForInterruption(conversationID: conversationID)
         } else {
             cancelPresentationTasks { record in
@@ -1896,6 +1911,22 @@ final class AppModel {
         ))
     }
 
+    /// A reopened legacy chat may have a new UUID while its first session stays
+    /// archived. Startup and restore must bind the visible direct session;
+    /// group anchor records also resolve to the legacy role and are excluded.
+    private static func preferredLegacyDirectConversation(
+        in conversations: [ConversationRecord],
+        excluding groupConversationIDs: Set<UUID>
+    ) -> ConversationRecord? {
+        let direct = conversations.filter {
+            $0.resolvedRoleID == RoleScope.legacyRoleID
+                && !groupConversationIDs.contains($0.id)
+        }
+        return direct.first { !$0.archived && $0.id == defaultConversationID }
+            ?? direct.first { !$0.archived }
+            ?? direct.first { $0.id == defaultConversationID }
+    }
+
     /// Switches every role-owned observable and derived index as one operation.
     /// Re-selecting the already active conversation is intentionally idempotent:
     /// navigation may destroy and recreate `ChatView`, but that must not cancel
@@ -1919,8 +1950,12 @@ final class AppModel {
             ]
         )
         let conversations = try context.fetch(descriptor)
+        let groupConversationIDs = Set(
+            try context.fetch(FetchDescriptor<GroupConversationRecord>()).map(\.conversationID)
+        )
         let roleConversations = conversations.filter {
             $0.resolvedRoleID == resolvedRoleID && !$0.archived
+                && !groupConversationIDs.contains($0.id)
         }
         let conversation: ConversationRecord
         if let preferredConversationID,
@@ -1932,10 +1967,13 @@ final class AppModel {
         } else if let existing = roleConversations.first {
             conversation = existing
         } else {
+            // The deterministic ID belongs to the first legacy session. Once
+            // that session is archived, Contacts must create a distinct session
+            // rather than a duplicate row that reconciliation will hide again.
+            let canUseDefaultID = resolvedRoleID == RoleScope.legacyRoleID
+                && !conversations.contains { $0.id == Self.defaultConversationID }
             conversation = ConversationRecord(
-                id: resolvedRoleID == RoleScope.legacyRoleID
-                    ? Self.defaultConversationID
-                    : UUID(),
+                id: canUseDefaultID ? Self.defaultConversationID : UUID(),
                 title: configuration.name,
                 roleID: resolvedRoleID
             )
@@ -1969,8 +2007,10 @@ final class AppModel {
         if generationTask != nil || isGenerating || activeChatUserEventID != nil {
             cancelActiveChatTurnForInterruption()
         }
-        if groupGenerationTask != nil || isGeneratingGroupReply || activeGroupUserEventID != nil,
-           let activeGroupConversationID {
+        if let groupRequestConversationID {
+            cancelActiveGroupTurnForInterruption(conversationID: groupRequestConversationID)
+        } else if groupGenerationTask != nil || isGeneratingGroupReply || activeGroupUserEventID != nil,
+                  let activeGroupConversationID {
             cancelActiveGroupTurnForInterruption(conversationID: activeGroupConversationID)
         }
 
@@ -3442,36 +3482,53 @@ final class AppModel {
         guard groupConversations.contains(where: { $0.conversationID == conversationID }) else {
             return
         }
-        if let activeGroupConversationID {
-            if activeGroupConversationID != conversationID {
-                cancelActiveGroupTurnForInterruption(conversationID: activeGroupConversationID)
-            } else if groupGenerationTask != nil || activeGroupUserEventID != nil {
-                cancelActiveGroupTurnForInterruption(conversationID: conversationID)
+        if let groupRequestConversationID,
+           groupRequestConversationID != conversationID {
+            // A real group switch must invalidate the old request even when
+            // its screen was already detached and the UI selection is nil.
+            cancelActiveGroupTurnForInterruption(conversationID: groupRequestConversationID)
+        } else if groupRequestConversationID == nil {
+            // Startup-resumed presentations have no provider request to retain
+            // their group identity. Once closeGroup() detaches the projection,
+            // use the durable queue itself to find and cancel stale groups on a
+            // real group switch while preserving a queue for this same group.
+            var staleGroupIDs = pendingGroupPresentationConversationIDs()
+            staleGroupIDs.remove(conversationID)
+            if let activeGroupConversationID,
+               activeGroupConversationID != conversationID {
+                staleGroupIDs.insert(activeGroupConversationID)
+                if groupGenerationTask != nil || activeGroupUserEventID != nil {
+                    cancelActiveGroupTurnForInterruption(
+                        conversationID: activeGroupConversationID
+                    )
+                    staleGroupIDs.remove(activeGroupConversationID)
+                }
             }
+            cancelGroupPresentationQueues(for: staleGroupIDs)
         }
-        groupGenerationTask?.cancel()
-        groupGenerationTask = nil
         activeGroupConversationID = conversationID
-        isGeneratingGroupReply = hasPendingGroupPresentation(for: conversationID)
+        isGeneratingGroupReply = groupRequestConversationID == conversationID
+            || hasPendingGroupPresentation(for: conversationID)
         reloadGroupMessages(conversationID: conversationID)
     }
 
     func closeGroup() {
-        if let activeGroupConversationID {
-            cancelActiveGroupTurnForInterruption(conversationID: activeGroupConversationID)
-        }
-        groupGenerationTask?.cancel()
-        groupGenerationTask = nil
+        // Navigation only detaches the projection. The provider task and its
+        // durable presentation queue remain owned by AppModel until the user
+        // explicitly stops it or opens a different group.
         isGeneratingGroupReply = false
         activeGroupConversationID = nil
         groupMessages = []
     }
 
     func stopGroupGenerating() {
-        if let activeGroupConversationID {
+        if let groupRequestConversationID {
+            cancelActiveGroupTurnForInterruption(conversationID: groupRequestConversationID)
+        } else if let activeGroupConversationID {
+            // A resumed presentation may have no provider task, but Stop must
+            // still cancel that visible group's durable queue.
             cancelActiveGroupTurnForInterruption(conversationID: activeGroupConversationID)
         }
-        groupGenerationTask?.cancel()
     }
 
     func sendGroupMessage(
@@ -3548,6 +3605,7 @@ final class AppModel {
         isGeneratingGroupReply = true
         groupTurnGeneration &+= 1
         let turnGeneration = groupTurnGeneration
+        groupRequestConversationID = conversationID
         activeGroupUserEventID = pokeEvent.id
         errorMessage = nil
         groupGenerationTask = Task { @MainActor [weak self] in
@@ -3695,6 +3753,7 @@ final class AppModel {
         isGeneratingGroupReply = true
         groupTurnGeneration &+= 1
         let turnGeneration = groupTurnGeneration
+        groupRequestConversationID = conversationID
         activeGroupUserEventID = userEvent.id
         errorMessage = nil
         groupGenerationTask = Task { @MainActor [weak self] in
@@ -5681,9 +5740,12 @@ final class AppModel {
                 sortBy: [SortDescriptor(\.updatedAt, order: .reverse)]
             )
             let conversations = try context.fetch(conversationDescriptor)
-            guard let restoredConversation = conversations.first(where: {
-                $0.id == Self.defaultConversationID
-            }) ?? conversations.first else {
+            let groupConversationIDs = Set(
+                try context.fetch(FetchDescriptor<GroupConversationRecord>()).map(\.conversationID)
+            )
+            guard let restoredConversation = Self.preferredLegacyDirectConversation(
+                in: conversations, excluding: groupConversationIDs
+            ) ?? conversations.first(where: { !groupConversationIDs.contains($0.id) }) else {
                 throw DataImportError.invalidValue("恢复后找不到主会话")
             }
             currentConversation = restoredConversation
@@ -6158,6 +6220,18 @@ final class AppModel {
         }
     }
 
+    private func cancelGroupPresentationQueues(for conversationIDs: Set<UUID>) {
+        guard !conversationIDs.isEmpty else { return }
+        cancelPresentationTasks { record in
+            self.isGroupPresentation(record)
+                && conversationIDs.contains(record.conversationID)
+        }
+        cancelPresentationRecords { record in
+            self.isGroupPresentation(record)
+                && conversationIDs.contains(record.conversationID)
+        }
+    }
+
     private func refreshPresentationProjections(
         for record: ChatTurnPresentationRecord
     ) {
@@ -6165,7 +6239,13 @@ final class AppModel {
         if isGroupPresentation(record) {
             if activeGroupConversationID == record.conversationID {
                 reloadGroupMessages(conversationID: record.conversationID)
+            } else {
+                // A group reply can finish while its screen is detached. Keep
+                // the home list and its activity projection current as soon as
+                // the durable presentation reaches a terminal state.
+                reloadGroupConversations()
             }
+            refreshUnreadState()
         } else if currentConversation.id == record.conversationID,
                   RoleScope.resolve(record.roleID) == currentRoleID {
             reloadMessages()
@@ -6179,6 +6259,14 @@ final class AppModel {
                 && $0.conversationID == conversationID
                 && !$0.state.isTerminal
         }
+    }
+
+    private func pendingGroupPresentationConversationIDs() -> Set<UUID> {
+        Set(
+            chatTurnPresentations()
+                .filter { isGroupPresentation($0) && !$0.state.isTerminal }
+                .map(\.conversationID)
+        )
     }
 
     private func refreshPresentationGeneratingFlags() {
@@ -6529,13 +6617,18 @@ final class AppModel {
         presentationGeneration &+= 1
         groupGenerationTask?.cancel()
         groupGenerationTask = nil
-        let targetIDs = Set([conversationID, activeGroupConversationID].compactMap { $0 })
+        let targetIDs = Set([
+            conversationID,
+            groupRequestConversationID,
+            activeGroupConversationID
+        ].compactMap { $0 })
         cancelPresentationTasks { record in
             self.isGroupPresentation(record) && targetIDs.contains(record.conversationID)
         }
         cancelPresentationRecords { record in
             self.isGroupPresentation(record) && targetIDs.contains(record.conversationID)
         }
+        groupRequestConversationID = nil
         activeGroupUserEventID = nil
         if let activeGroupConversationID,
            targetIDs.contains(activeGroupConversationID) {
@@ -6551,6 +6644,7 @@ final class AppModel {
         generationTask = nil
         groupGenerationTask?.cancel()
         groupGenerationTask = nil
+        groupRequestConversationID = nil
         for task in presentationTasks.values { task.cancel() }
         presentationTasks.removeAll()
         if markPending {
@@ -7174,6 +7268,7 @@ final class AppModel {
         do {
             guard generation == dataGeneration,
                   turnGeneration == groupTurnGeneration,
+                  groupRequestConversationID == conversationID,
                   integrityConflict == nil else {
                 throw CancellationError()
             }
@@ -7223,7 +7318,7 @@ final class AppModel {
                 guard turnGeneration == groupTurnGeneration else {
                     throw CancellationError()
                 }
-                guard activeGroupConversationID == conversationID else {
+                guard groupRequestConversationID == conversationID else {
                     throw CancellationError()
                 }
                 let connection = try resolvedAIConnection(for: roleID)
@@ -7248,7 +7343,7 @@ final class AppModel {
                 }
                 guard generation == dataGeneration,
                       turnGeneration == groupTurnGeneration,
-                      activeGroupConversationID == conversationID,
+                      groupRequestConversationID == conversationID,
                       integrityConflict == nil else {
                     throw CancellationError()
                 }
@@ -7262,7 +7357,7 @@ final class AppModel {
                     : []
                 guard generation == dataGeneration,
                       turnGeneration == groupTurnGeneration,
-                      activeGroupConversationID == conversationID,
+                      groupRequestConversationID == conversationID,
                       integrityConflict == nil else {
                     throw CancellationError()
                 }
@@ -7323,6 +7418,7 @@ final class AppModel {
                         try Task.checkCancellation()
                         guard generation == dataGeneration,
                               turnGeneration == groupTurnGeneration,
+                              groupRequestConversationID == conversationID,
                               integrityConflict == nil else {
                             throw CancellationError()
                         }
@@ -7338,7 +7434,7 @@ final class AppModel {
                 }
                 guard generation == dataGeneration,
                       turnGeneration == groupTurnGeneration,
-                      activeGroupConversationID == conversationID,
+                      groupRequestConversationID == conversationID,
                       integrityConflict == nil else {
                     throw CancellationError()
                 }
@@ -7364,25 +7460,32 @@ final class AppModel {
             }
             scheduleGroupMemoryMaintenance()
             guard turnGeneration == groupTurnGeneration,
-                  activeGroupConversationID == conversationID else { return }
-            isGeneratingGroupReply = false
+                  groupRequestConversationID == conversationID else { return }
             groupGenerationTask = nil
+            groupRequestConversationID = nil
             activeGroupUserEventID = nil
-            reloadGroupMessages(conversationID: conversationID)
-        } catch is CancellationError {
-            guard turnGeneration == groupTurnGeneration else { return }
             if activeGroupConversationID == conversationID {
                 isGeneratingGroupReply = false
-                groupGenerationTask = nil
-                activeGroupUserEventID = nil
+                reloadGroupMessages(conversationID: conversationID)
+            }
+        } catch is CancellationError {
+            guard turnGeneration == groupTurnGeneration,
+                  groupRequestConversationID == conversationID else { return }
+            groupGenerationTask = nil
+            groupRequestConversationID = nil
+            activeGroupUserEventID = nil
+            if activeGroupConversationID == conversationID {
+                isGeneratingGroupReply = false
                 reloadGroupMessages(conversationID: conversationID)
             }
         } catch {
-            guard turnGeneration == groupTurnGeneration else { return }
+            guard turnGeneration == groupTurnGeneration,
+                  groupRequestConversationID == conversationID else { return }
+            groupGenerationTask = nil
+            groupRequestConversationID = nil
+            activeGroupUserEventID = nil
             if activeGroupConversationID == conversationID {
                 isGeneratingGroupReply = false
-                groupGenerationTask = nil
-                activeGroupUserEventID = nil
                 errorMessage = error.localizedDescription
                 reloadGroupMessages(conversationID: conversationID)
             }
@@ -7497,8 +7600,7 @@ final class AppModel {
         presentation.updatedAt = Date()
         presentation.revision += 1
         try context.save()
-        presentationRevision &+= 1
-        reloadGroupMessages(conversationID: conversationID)
+        refreshPresentationProjections(for: presentation)
     }
 
     private func groupPromptConversationContext(
@@ -12393,20 +12495,26 @@ final class AppModel {
         let active = MemoryState.active.rawValue
         let roleID = currentRoleID
         let includesLegacyNilRows = roleID == RoleScope.legacyRoleID
+        let memoryPredicate = #Predicate<MemoryAssertionRecord> { memory in
+            memory.stateRaw == active
+                && (memory.roleID == roleID
+                    || (includesLegacyNilRows && memory.roleID == nil))
+                && (memory.embeddingData == nil || memory.embeddingModelID != embeddingModelID)
+        }
         var descriptor = FetchDescriptor<MemoryAssertionRecord>(
-            predicate: #Predicate {
-                $0.stateRaw == active
-                    && ($0.roleID == roleID
-                        || (includesLegacyNilRows && $0.roleID == nil))
-                    && ($0.embeddingData == nil || $0.embeddingModelID != embeddingModelID)
-            },
+            predicate: memoryPredicate,
             sortBy: [SortDescriptor(\.updatedAt, order: .reverse)]
         )
         // Tombstone filtering can discard a few stale CloudKit copies. Fetch a
         // small bounded surplus rather than materializing the complete library
         // just to create at most `limit` embeddings.
         descriptor.fetchLimit = max(1, min(max(limit * 3, limit), 50))
-        guard let memories = try? context.fetch(descriptor) else { return }
+        let memories: [MemoryAssertionRecord]
+        do {
+            memories = try context.fetch(descriptor)
+        } catch {
+            return
+        }
         var completed = 0
         for candidate in memories {
             guard generation == dataGeneration,
@@ -12417,8 +12525,11 @@ final class AppModel {
                 id: candidate.id,
                 roleID: roleID,
                 context: context
-            ), memory.state == .active,
-               memory.embeddingData == nil || memory.embeddingModelID != embeddingModelID else {
+            ) else {
+                continue
+            }
+            guard memory.state == MemoryState.active,
+                  memory.embeddingData == nil || memory.embeddingModelID != embeddingModelID else {
                 continue
             }
             guard isCurrentAcceptedRelationshipForMemory(roleID: currentRoleID) else { return }
@@ -12668,28 +12779,40 @@ final class AppModel {
         _ event: ConversationEvent,
         conversationID: UUID
     ) {
-        guard activeGroupConversationID == conversationID,
-              event.conversationID == conversationID,
+        guard event.conversationID == conversationID,
               !event.redacted,
               !conflictedEventIDs.contains(event.id) else {
             return
         }
-        var visible = groupMessages
-        let wasBoundedWindow = visible.count <= Self.messageWindowSize
-        if let index = visible.firstIndex(where: { $0.id == event.id }) {
-            visible[index] = event
-        } else {
-            visible.append(event)
-            visible.sort(by: Self.conversationEventIsEarlier)
-            if wasBoundedWindow, visible.count > Self.messageWindowSize {
-                visible.removeFirst(visible.count - Self.messageWindowSize)
+        if activeGroupConversationID == conversationID {
+            var visible = groupMessages
+            let wasBoundedWindow = visible.count <= Self.messageWindowSize
+            if let index = visible.firstIndex(where: { $0.id == event.id }) {
+                visible[index] = event
+            } else {
+                visible.append(event)
+                visible.sort(by: Self.conversationEventIsEarlier)
+                if wasBoundedWindow, visible.count > Self.messageWindowSize {
+                    visible.removeFirst(visible.count - Self.messageWindowSize)
+                }
             }
+            groupMessages = visible
+            if let latest = visible.last {
+                groupConversationActivities[conversationID] = ConversationListActivitySummary(
+                    preview: latest.content.trimmingCharacters(in: .whitespacesAndNewlines),
+                    lastActivityAt: latest.occurredAt
+                )
+            }
+            return
         }
-        groupMessages = visible
-        if let latest = visible.last {
+
+        // Keep the detached home-list preview current without binding the old
+        // transcript back to the newly selected group.
+        if groupConversationActivities[conversationID]?.lastActivityAt ?? .distantPast
+            <= event.occurredAt {
             groupConversationActivities[conversationID] = ConversationListActivitySummary(
-                preview: latest.content.trimmingCharacters(in: .whitespacesAndNewlines),
-                lastActivityAt: latest.occurredAt
+                preview: event.content.trimmingCharacters(in: .whitespacesAndNewlines),
+                lastActivityAt: event.occurredAt
             )
         }
     }

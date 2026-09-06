@@ -128,9 +128,17 @@ class RepositoryReleaseConfigurationTests(unittest.TestCase):
         android = (REPOSITORY_ROOT / "multiplatform/androidApp/build.gradle.kts").read_text()
         desktop = (REPOSITORY_ROOT / "multiplatform/desktopApp/build.gradle.kts").read_text()
         readme = (REPOSITORY_ROOT / "README.md").read_text()
+        workflow = (REPOSITORY_ROOT / ".github/workflows/release.yml").read_text()
 
         self.assertEqual(project.count("MARKETING_VERSION = 0.1.5;"), 6)
-        self.assertEqual(project.count("CURRENT_PROJECT_VERSION = 37;"), 6)
+        self.assertEqual(project.count("CURRENT_PROJECT_VERSION = 38;"), 6)
+        self.assertIn("CURRENT_PROJECT_VERSION=38", workflow)
+        self.assertEqual(workflow.count('plutil -extract CFBundleVersion'), 3)
+        for line in workflow.splitlines():
+            if "plutil -extract CFBundleVersion" in line:
+                self.assertTrue(line.rstrip().endswith('= "38"'), line)
+        self.assertIn("Apple Build 38", workflow)
+        self.assertIn("Apple 构建号 `38`", readme)
         self.assertNotIn("MARKETING_VERSION = 0.1.4;", project)
         self.assertIn('.orElse("0.1.5")', gradle)
         self.assertIn("versionCode = 5", android)
